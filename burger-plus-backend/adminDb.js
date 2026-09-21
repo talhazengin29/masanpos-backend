@@ -329,6 +329,8 @@ export async function adminTablolariHazirla(isletmeId) {
     CREATE INDEX IF NOT EXISTS revizyon_kayitlari_tarih_idx ON revizyon_kayitlari (olusturma DESC);
     CREATE INDEX IF NOT EXISTS siparis_kalemleri_hazirlik_idx
       ON siparis_kalemleri (olusturma DESC, hazirlamaya_baslandi, hazir_at);
+    CREATE INDEX IF NOT EXISTS siparis_kalemleri_isletme_tarih_idx
+      ON siparis_kalemleri (isletme_id, olusturma DESC);
   `);
   await pool.query(`
     ALTER TABLE kategoriler DROP CONSTRAINT IF EXISTS kategoriler_ad_key;

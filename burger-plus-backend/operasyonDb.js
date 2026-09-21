@@ -36,7 +36,93 @@ function yogunlukSeviyesi(kuyruk, vardiyada) {
   return "kritik";
 }
 
-function aksiyonlariOlustur({ nakit, mutfak, stok, personel }) {
+function operasyonOngorusunuOlustur({ tahmin = {}, metrikler, mutfak, personel }) {
+  const ornekGun = Math.max(0, Math.round(sayi(tahmin.ornek_gun)));
+  const aktifGun = Math.max(0, Math.round(sayi(tahmin.aktif_gun)));
+  const hazir = aktifGun >= 2;
+  const beklenenSiparis = yuvarla(tahmin.gelecek_siparis, 1);
+  const beklenenCiro = yuvarla(tahmin.gelecek_ciro);
+  const gunSonuCiroTahmini = yuvarla(sayi(metrikler.bugunSiparisTutari) + sayi(tahmin.kalan_ciro));
+  const gecmisTempoCiro = sayi(tahmin.simdiye_kadar_ciro);
+  const tempoDegisimiYuzde = gecmisTempoCiro > 0
+    ? Math.round(((sayi(metrikler.bugunSiparisTutari) - gecmisTempoCiro) / gecmisTempoCiro) * 100)
+    : null;
+  const guvenOrani = Math.min(100, Math.round((aktifGun / 6) * 100));
+  const guvenSeviyesi = guvenOrani >= 84 ? "yuksek" : guvenOrani >= 50 ? "orta" : "dusuk";
+  const beklenenYuk = sayi(mutfak.kuyruktakiSiparis) + beklenenSiparis;
+  const vardiyada = Math.max(0, Math.round(sayi(personel.vardiyada)));
+  const onerilenPersonel = hazir && beklenenYuk > 0 ? Math.max(1, Math.ceil(beklenenYuk / 3)) : 0;
+  const ekPersonelIhtiyaci = Math.max(0, onerilenPersonel - vardiyada);
+  const kapasite = Math.max(3, vardiyada * 3);
+  const risk = !hazir ? "belirsiz"
+    : vardiyada === 0 && beklenenYuk > 0 ? "kritik"
+      : beklenenYuk > kapasite * 2 ? "kritik"
+        : beklenenYuk > kapasite ? "yuksek"
+          : beklenenYuk > kapasite * 0.65 ? "normal" : "sakin";
+
+  let baslik = "Tahmin için veri birikiyor";
+  let aciklama = "En az iki benzer gün tamamlandığında 30 dakikalık operasyon öngörüsü üretilecek.";
+  if (hazir && ekPersonelIhtiyaci > 0) {
+    baslik = `Önümüzdeki 30 dakika için ${ekPersonelIhtiyaci} personel desteği gerekebilir`;
+    aciklama = `Yaklaşık ${beklenenSiparis.toLocaleString("tr-TR")} sipariş ve ${beklenenYuk.toLocaleString("tr-TR")} toplam mutfak yükü öngörülüyor.`;
+  } else if (hazir && tempoDegisimiYuzde != null && tempoDegisimiYuzde >= 15) {
+    baslik = `Bugünkü tempo benzer günlerin %${tempoDegisimiYuzde} üzerinde`;
+    aciklama = `Önümüzdeki 30 dakikada yaklaşık ${beklenenSiparis.toLocaleString("tr-TR")} sipariş bekleniyor.`;
+  } else if (hazir) {
+    baslik = "Önümüzdeki 30 dakika kontrol altında";
+    aciklama = `Yaklaşık ${beklenenSiparis.toLocaleString("tr-TR")} sipariş ve ₺${beklenenCiro.toLocaleString("tr-TR")} ciro öngörülüyor.`;
+  }
+
+  return {
+    hazir,
+    pencereDakika: 30,
+    beklenenSiparis,
+    beklenenCiro,
+    gunSonuCiroTahmini,
+    tempoDegisimiYuzde,
+    risk,
+    guven: { oran: guvenOrani, seviye: guvenSeviyesi, ornekGun, aktifGun },
+    personel: { mevcut: vardiyada, onerilen: onerilenPersonel, ekIhtiyac: ekPersonelIhtiyaci },
+    baslik,
+    aciklama,
+  };
+}
+
+function yoneticiOzetiniOlustur({ metrikler, mutfak, nakit, stok, personel, ongoru }) {
+  const parcalar = [];
+  if (metrikler.bugunSiparis > 0) {
+    parcalar.push(`Bugün ${metrikler.bugunSiparis} siparişte ₺${metrikler.bugunSiparisTutari.toLocaleString("tr-TR")} sipariş hacmine ulaşıldı; ortalama sepet ₺${metrikler.ortalamaSepet.toLocaleString("tr-TR")}.`);
+  } else {
+    parcalar.push("Bugün henüz sipariş hareketi oluşmadı.");
+  }
+
+  if (mutfak.gecikenSiparis > 0) {
+    parcalar.push(`${mutfak.gecikenSiparis} sipariş gecikme eşiğini aştı; en uzun bekleme ${Math.round(mutfak.enUzunBeklemeDakika)} dakika.`);
+  } else if (mutfak.kuyruktakiSiparis > 0) {
+    parcalar.push(`Mutfakta ${mutfak.kuyruktakiSiparis} sipariş sırada ve yoğunluk ${mutfak.yogunluk}.`);
+  }
+
+  if (nakit.onayBekleyen > 0 || nakit.tahsilatBekleyen > 0) {
+    parcalar.push(`${nakit.onayBekleyen} nakit sipariş onay, ${nakit.tahsilatBekleyen} hesap tahsilat bekliyor.`);
+  }
+  if (stok.kritikToplam > 0) {
+    parcalar.push(`${stok.kritikToplam} stok kalemi kritik seviyede${stok.stoktaYok > 0 ? `; ${stok.stoktaYok} kalem tükendi` : ""}.`);
+  }
+  if (ongoru.hazir) {
+    parcalar.push(`Gün sonu sipariş hacmi tahmini ₺${ongoru.gunSonuCiroTahmini.toLocaleString("tr-TR")}; tahmin güveni %${ongoru.guven.oran}.`);
+  }
+
+  const kritik = mutfak.gecikenSiparis > 0 || nakit.onayBekleyen > 0 || stok.stoktaYok > 0
+    || (mutfak.kuyruktakiSiparis > 0 && personel.vardiyada === 0);
+  const dikkat = !kritik && (mutfak.kuyruktakiSiparis > 0 || nakit.tahsilatBekleyen > 0 || stok.kritikToplam > 0);
+  return {
+    baslik: kritik ? "Müdahale gereken noktalar var" : dikkat ? "Operasyonu yakından izleyin" : "Operasyon dengeli ilerliyor",
+    durum: kritik ? "kritik" : dikkat ? "dikkat" : "normal",
+    metin: parcalar.join(" "),
+  };
+}
+
+function aksiyonlariOlustur({ nakit, mutfak, stok, personel, ongoru }) {
   const aksiyonlar = [];
   if (nakit.onayBekleyen > 0) {
     aksiyonlar.push({
@@ -90,6 +176,16 @@ function aksiyonlariOlustur({ nakit, mutfak, stok, personel }) {
       hedef: "/admin/personeller",
     });
   }
+  if (ongoru.hazir && ongoru.personel.ekIhtiyac > 0) {
+    aksiyonlar.push({
+      id: "vardiya-ongorusu",
+      oncelik: ongoru.risk === "kritik" ? "kritik" : "yuksek",
+      tur: "personel",
+      baslik: `${ongoru.pencereDakika} dakika içinde personel desteği gerekebilir`,
+      aciklama: `${ongoru.personel.mevcut} kişi vardiyada, önerilen kapasite ${ongoru.personel.onerilen} kişi.`,
+      hedef: "/admin/personeller",
+    });
+  }
   const oncelikSirasi = { kritik: 0, yuksek: 1, orta: 2, dusuk: 3 };
   return aksiyonlar.sort((a, b) => oncelikSirasi[a.oncelik] - oncelikSirasi[b.oncelik]);
 }
@@ -101,6 +197,7 @@ export function operasyonNabziniOlustur({
   masaSatirlari = [],
   stokSatirlari = [],
   sonSiparisler = [],
+  tahmin = {},
   uretimZamani = new Date().toISOString(),
 } = {}) {
   const bugunSiparis = sayi(ozet.bugun_siparis);
@@ -199,13 +296,15 @@ export function operasyonNabziniOlustur({
       olusturma: siparis.olusturma,
     })),
   };
+  sonuc.ongoru = operasyonOngorusunuOlustur({ tahmin, metrikler: sonuc.metrikler, mutfak, personel });
+  sonuc.yoneticiOzeti = yoneticiOzetiniOlustur(sonuc);
   sonuc.aksiyonlar = aksiyonlariOlustur(sonuc);
   return sonuc;
 }
 
 export async function operasyonNabziniGetir(isletmeId, veritabani = pool) {
   const tenantId = isletmeIdZorunlu(isletmeId);
-  const [ozetSonucu, mutfakSonucu, hazirlikSonucu, masaSonucu, stokSonucu, sonSiparisSonucu] = await Promise.all([
+  const [ozetSonucu, mutfakSonucu, hazirlikSonucu, masaSonucu, stokSonucu, sonSiparisSonucu, tahminSonucu] = await Promise.all([
     veritabani.query(`
       WITH bugun_siparisler AS (
         SELECT COALESCE(siparis_no,id::text) siparis_no,SUM(fiyat*adet) tutar
@@ -296,6 +395,35 @@ export async function operasyonNabziniGetir(isletmeId, veritabani = pool) {
       GROUP BY COALESCE(k.siparis_no,'oturum-'||k.oturum_id::text),o.masa_no
       ORDER BY MIN(k.olusturma) DESC LIMIT 12
     `, [tenantId]),
+    veritabani.query(`
+      WITH gunler AS (
+        SELECT (CURRENT_DATE-(hafta*INTERVAL '7 days'))::date gun
+        FROM generate_series(1,6) hafta
+      ), siparisler AS (
+        SELECT COALESCE(siparis_no,'oturum-'||oturum_id::text) siparis_no,
+          MIN(olusturma) olusturma,SUM(fiyat*adet) tutar
+        FROM siparis_kalemleri
+        WHERE isletme_id=$1 AND olusturma>=CURRENT_DATE-INTERVAL '42 days' AND olusturma<CURRENT_DATE
+        GROUP BY COALESCE(siparis_no,'oturum-'||oturum_id::text)
+      ), gun_ozetleri AS (
+        SELECT g.gun,COUNT(s.siparis_no)::int gun_siparis,
+          COUNT(s.siparis_no) FILTER (WHERE s.olusturma<g.gun+LOCALTIME)::int simdiye_kadar_siparis,
+          COALESCE(SUM(s.tutar) FILTER (WHERE s.olusturma<g.gun+LOCALTIME),0) simdiye_kadar_ciro,
+          COUNT(s.siparis_no) FILTER (WHERE s.olusturma>=g.gun+LOCALTIME AND s.olusturma<g.gun+LOCALTIME+INTERVAL '30 minutes')::int gelecek_siparis,
+          COALESCE(SUM(s.tutar) FILTER (WHERE s.olusturma>=g.gun+LOCALTIME AND s.olusturma<g.gun+LOCALTIME+INTERVAL '30 minutes'),0) gelecek_ciro,
+          COALESCE(SUM(s.tutar) FILTER (WHERE s.olusturma>=g.gun+LOCALTIME),0) kalan_ciro
+        FROM gunler g
+        LEFT JOIN siparisler s ON s.olusturma>=g.gun AND s.olusturma<g.gun+INTERVAL '1 day'
+        GROUP BY g.gun
+      )
+      SELECT COUNT(*)::int ornek_gun,COUNT(*) FILTER (WHERE gun_siparis>0)::int aktif_gun,
+        ROUND(AVG(simdiye_kadar_siparis),1) simdiye_kadar_siparis,
+        ROUND(AVG(simdiye_kadar_ciro),2) simdiye_kadar_ciro,
+        ROUND(AVG(gelecek_siparis),1) gelecek_siparis,
+        ROUND(AVG(gelecek_ciro),2) gelecek_ciro,
+        ROUND(AVG(kalan_ciro),2) kalan_ciro
+      FROM gun_ozetleri
+    `, [tenantId]),
   ]);
 
   return operasyonNabziniOlustur({
@@ -305,5 +433,6 @@ export async function operasyonNabziniGetir(isletmeId, veritabani = pool) {
     masaSatirlari: masaSonucu.rows,
     stokSatirlari: stokSonucu.rows,
     sonSiparisler: sonSiparisSonucu.rows,
+    tahmin: tahminSonucu.rows[0] || {},
   });
 }

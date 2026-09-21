@@ -979,6 +979,14 @@ const guvenli = (islem) => async (req, res) => {
 };
 
 const salonRolu = () => rolMiddleware(["salon", "kasiyer"]);
+const operasyonNabziDegisikliginiYayinla = (tenantId, tur, detay = {}) => {
+  io.to(oda(tenantId, "yonetim")).emit("operasyon-nabzi-guncellendi", {
+    tur,
+    ...detay,
+    zaman: new Date().toISOString(),
+  });
+};
+
 const nakitDegisikliginiYayinla = (tenantId, masaNo, siparis = null) => {
   io.to(oda(tenantId, "salon")).emit("nakit-guncellendi", { masaNo });
   if (masaNo) {
@@ -987,6 +995,11 @@ const nakitDegisikliginiYayinla = (tenantId, masaNo, siparis = null) => {
       ...(siparis ? { siparis } : {}),
     });
   }
+  operasyonNabziDegisikliginiYayinla(tenantId, "nakit", {
+    masaNo,
+    ...(siparis?.siparisNo ? { siparisNo: siparis.siparisNo } : {}),
+    ...(siparis?.durum ? { durum: siparis.durum } : {}),
+  });
 };
 
 app.get("/api/sikayetlerim", korumaliMiddleware(), async (req, res) => {
@@ -1426,11 +1439,13 @@ app.get("/api/admin/recete-stok", admin, guvenli(async (req) => receteStokMerkez
 app.post("/api/admin/hammaddeler", admin, guvenli(async (req) => {
   const hammadde = await hammaddeKaydet(req.isletme.id, pool, req.body || {});
   io.to(oda(req.isletme.id, "yonetim")).emit("recete-stok-guncellendi");
+  operasyonNabziDegisikliginiYayinla(req.isletme.id, "stok", { hammaddeId: hammadde.id });
   return { hammadde };
 }));
 app.post("/api/admin/hammaddeler/:id/stok-hareketi", admin, guvenli(async (req) => {
   const sonuc = await hammaddeStokHareketiKaydet(req.isletme.id, pool, req.params.id, req.body || {}, req.kullanici?.id);
   io.to(oda(req.isletme.id, "yonetim")).emit("recete-stok-guncellendi");
+  operasyonNabziDegisikliginiYayinla(req.isletme.id, "stok", { hammaddeId: Number(req.params.id) });
   return sonuc;
 }));
 app.put("/api/admin/urunler/:id/recete", admin, guvenli(async (req) => {
@@ -1438,6 +1453,7 @@ app.put("/api/admin/urunler/:id/recete", admin, guvenli(async (req) => {
     malzemeleriOtomatikGuncelle: req.body?.malzemeleriOtomatikGuncelle !== false,
   });
   io.to(oda(req.isletme.id, "yonetim")).emit("recete-stok-guncellendi");
+  operasyonNabziDegisikliginiYayinla(req.isletme.id, "stok", { urunId: Number(req.params.id) });
   return { basarili: true };
 }));
 app.post("/api/admin/urunler", admin, guvenli(async (req) => {
@@ -1446,6 +1462,7 @@ app.post("/api/admin/urunler", admin, guvenli(async (req) => {
   const urun = await urunKaydet(t, req.body);
   await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "urun", varlikId: urun.id, islem: eski ? "guncelleme" : "ekleme", aciklama: eski ? `${urun.ad} ürünü güncellendi.` : `${urun.ad} ürünü eklendi.`, eskiDeger: eski, yeniDeger: urun });
   io.to(oda(t, "genel")).emit("urunler-guncellendi", await urunleriGetir(t));
+  operasyonNabziDegisikliginiYayinla(t, "urun", { urunId: urun.id });
   return { urun };
 }));
 app.patch("/api/admin/urunler/:id/aktif", admin, guvenli(async (req) => {
@@ -1455,6 +1472,7 @@ app.patch("/api/admin/urunler/:id/aktif", admin, guvenli(async (req) => {
   const yeni = await yonetimVarliginiGetir(t, "urun", req.params.id);
   await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "urun", varlikId: req.params.id, islem: "durum", aciklama: `${eski?.ad || "Ürün"} ${req.body.aktif ? "yayına alındı" : "pasife alındı"}.`, eskiDeger: eski, yeniDeger: yeni });
   io.to(oda(t, "genel")).emit("urunler-guncellendi", await urunleriGetir(t));
+  operasyonNabziDegisikliginiYayinla(t, "urun", { urunId: Number(req.params.id), aktif: req.body.aktif === true });
 }));
 app.delete("/api/admin/urunler/:id", admin, guvenli(async (req) => {
   const t = req.isletme.id;
@@ -1462,6 +1480,7 @@ app.delete("/api/admin/urunler/:id", admin, guvenli(async (req) => {
   await urunArsivle(t, req.params.id);
   await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "urun", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Ürün"} katalogdan arşivlendi.`, eskiDeger: eski });
   io.to(oda(t, "genel")).emit("urunler-guncellendi", await urunleriGetir(t));
+  operasyonNabziDegisikliginiYayinla(t, "urun", { urunId: Number(req.params.id), arsivli: true });
 }));
 app.post("/api/admin/gorseller", dosyaYuklemeLimiti, admin, express.raw({ type: "image/*", limit: "5mb" }), guvenli(async (req) => {
   const gorsel = await gorselYukle(req.body, req.headers["content-type"]);
@@ -1574,6 +1593,7 @@ app.post("/api/admin/personeller", admin, guvenli(async (req) => {
   const eski = req.body.id ? await yonetimVarliginiGetir(t, "personel", req.body.id) : null;
   const personel = await personelKaydet(t, req.body);
   await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "personel", varlikId: personel.id, islem: eski ? "guncelleme" : "ekleme", aciklama: `${personel.ad} ${personel.soyad} personel kaydı ${eski ? "güncellendi" : "eklendi"}.`, eskiDeger: eski, yeniDeger: personel });
+  operasyonNabziDegisikliginiYayinla(t, "personel", { personelId: personel.id });
   return { personel };
 }));
 app.delete("/api/admin/personeller/:id", admin, guvenli(async (req) => {
@@ -1581,12 +1601,14 @@ app.delete("/api/admin/personeller/:id", admin, guvenli(async (req) => {
   const eski = await yonetimVarliginiGetir(t, "personel", req.params.id);
   await personelArsivle(t, req.params.id);
   await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "personel", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Personel"} ${eski?.soyad || ""} ekipten arşivlendi.`, eskiDeger: eski });
+  operasyonNabziDegisikliginiYayinla(t, "personel", { personelId: Number(req.params.id), arsivli: true });
 }));
 app.post("/api/admin/personeller/:id/vardiya", admin, guvenli(async (req) => {
   const t = req.isletme.id;
   await vardiyaDegistir(t, req.params.id, req.body.islem);
   const personel = await yonetimVarliginiGetir(t, "personel", req.params.id);
   await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "vardiya", varlikId: req.params.id, islem: req.body.islem, aciklama: `${personel?.ad || "Personel"} için vardiya ${req.body.islem === "giris" ? "başlatıldı" : "kapatıldı"}.` });
+  operasyonNabziDegisikliginiYayinla(t, "vardiya", { personelId: Number(req.params.id), islem: req.body.islem });
 }));
 app.get("/api/admin/raporlar/satis", admin, guvenli((req) => satisRaporuGetir(req.isletme.id, req.query.gun)));
 app.get("/api/admin/satislar/canli", admin, guvenli(async (req) => ({ satislar: await canliSatislariGetir(req.isletme.id, req.query) })));
@@ -1744,6 +1766,11 @@ async function onaylananOdemeyiMutfagaAktar(odeme) {
         urunler: aktarilacak.urunler.map((urun) => ({ ad: urun.ad, adet: Math.max(1, Number(urun.adet || 1)), fiyat: urun.fiyat })),
         durum: "yeni",
         olusturma: new Date().toISOString(),
+      });
+      operasyonNabziDegisikliginiYayinla(tenantId, "siparis", {
+        masaNo,
+        siparisNo: aktarilacak.siparisNo,
+        durum: "yeni",
       });
     });
   } catch (hata) {
@@ -1903,6 +1930,7 @@ io.on("connection", (socket) => {
         io.to(oda(tenantId, "mutfak")).emit("mutfak-guncellendi", tumMasalar);
         io.to(oda(tenantId, "salon")).emit("salon-guncellendi", tumMasalar);
         io.to(oda(tenantId, "yonetim")).emit("yonetim-operasyon-guncellendi", { masaNo, siparisNo, durum, zaman: new Date().toISOString() });
+        operasyonNabziDegisikliginiYayinla(tenantId, "mutfak", { masaNo, siparisNo, durum });
       }
       if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
     }).catch((e) => {
@@ -1931,6 +1959,7 @@ io.on("connection", (socket) => {
       await personelCagrilariniYayinla(tenantId);
       nakitDegisikliginiYayinla(tenantId, masaNo);
       io.to(oda(tenantId, "yonetim")).emit("yonetim-operasyon-guncellendi", { masaNo, durum: "kapali", zaman: new Date().toISOString() });
+      operasyonNabziDegisikliginiYayinla(tenantId, "masa", { masaNo, durum: "kapali" });
       if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
       console.log(`Masa ${masaNo} kapatildi`);
     }).catch((e) => {
