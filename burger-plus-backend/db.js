@@ -238,8 +238,13 @@ export async function tablolariHazirla(isletmeId) {
       para_birimi TEXT NOT NULL DEFAULT 'TRY',
       saglayici TEXT NOT NULL DEFAULT 'hazirlanıyor',
       saglayici_token TEXT UNIQUE,
+      saglayici_sayfa_url TEXT,
+      iyzico_baslatim_basladi TIMESTAMPTZ,
       durum TEXT NOT NULL DEFAULT 'bekliyor',
       mutfaga_aktarildi BOOLEAN NOT NULL DEFAULT false,
+      mutfaga_aktarim_basladi TIMESTAMPTZ,
+      idempotency_kapsam VARCHAR(80),
+      idempotency_anahtar VARCHAR(128),
       son_gecerlilik TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '20 minutes',
       basarili_at TIMESTAMPTZ,
       olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -247,6 +252,16 @@ export async function tablolariHazirla(isletmeId) {
     );
     CREATE INDEX IF NOT EXISTS odeme_islemleri_kullanici_idx
       ON odeme_islemleri (kullanici_id, olusturma DESC);
+  `);
+  await pool.query("ALTER TABLE odeme_islemleri ADD COLUMN IF NOT EXISTS mutfaga_aktarim_basladi TIMESTAMPTZ");
+  await pool.query("ALTER TABLE odeme_islemleri ADD COLUMN IF NOT EXISTS saglayici_sayfa_url TEXT");
+  await pool.query("ALTER TABLE odeme_islemleri ADD COLUMN IF NOT EXISTS iyzico_baslatim_basladi TIMESTAMPTZ");
+  await pool.query("ALTER TABLE odeme_islemleri ADD COLUMN IF NOT EXISTS idempotency_kapsam VARCHAR(80)");
+  await pool.query("ALTER TABLE odeme_islemleri ADD COLUMN IF NOT EXISTS idempotency_anahtar VARCHAR(128)");
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS odeme_islemleri_idempotency_unique
+    ON odeme_islemleri (isletme_id,idempotency_kapsam,idempotency_anahtar)
+    WHERE idempotency_kapsam IS NOT NULL AND idempotency_anahtar IS NOT NULL
   `);
 
   // Nakit sipariş yalnızca salon personelinin açtığı masadan verilebilir.
@@ -741,8 +756,16 @@ export async function siparisStogunuKesinlestir(isletmeId, odemeId, urunler) {
   }
 }
 
-export async function odemeTaslagiOlustur(isletmeId, { kullaniciId = null, masaNo = null, yontem = "tam", urunler, kisiAdi = "Misafir" }) {
+export async function odemeTaslagiOlustur(isletmeId, { kullaniciId = null, masaNo = null, yontem = "tam", urunler, kisiAdi = "Misafir", idempotencyAnahtari = null }) {
   const tenantId = isletmeIdZorunlu(isletmeId);
+  if (idempotencyAnahtari) {
+    const mevcut = await pool.query(
+      `SELECT * FROM odeme_islemleri
+       WHERE isletme_id=$1 AND idempotency_kapsam='odeme-taslagi' AND idempotency_anahtar=$2`,
+      [tenantId, idempotencyAnahtari]
+    );
+    if (mevcut.rows[0]) return odemeDonustur(mevcut.rows[0]);
+  }
   await suresiDolanStoklariBirak(pool, tenantId);
   const guvenliUrunler = await odemeUrunleriniDogrula(tenantId, urunler, kullaniciId);
   const hamMasa = masaNo == null || masaNo === "" ? null : String(masaNo).trim();
@@ -758,14 +781,27 @@ export async function odemeTaslagiOlustur(isletmeId, { kullaniciId = null, masaN
   try {
     await baglanti.query("BEGIN");
     await suresiDolanStoklariBirak(baglanti, tenantId);
-    const sonuc = await baglanti.query(
+    let sonuc = await baglanti.query(
       `INSERT INTO odeme_islemleri
-        (isletme_id,id,kullanici_id,siparis_no,masa_no,siparis_tipi,yontem,kisi_adi,urunler,tutar,kazanilan_puan)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11) RETURNING *`,
+        (isletme_id,id,kullanici_id,siparis_no,masa_no,siparis_tipi,yontem,kisi_adi,urunler,tutar,kazanilan_puan,
+         idempotency_kapsam,idempotency_anahtar)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,'odeme-taslagi',$12)
+       ON CONFLICT (isletme_id,idempotency_kapsam,idempotency_anahtar)
+         WHERE idempotency_kapsam IS NOT NULL AND idempotency_anahtar IS NOT NULL DO NOTHING
+       RETURNING *`,
       [tenantId, id, kullaniciId, siparisNo, guvenliMasa, tip, guvenliYontem,
         String(kisiAdi || "Misafir").trim().slice(0, 120) || "Misafir",
-        JSON.stringify(guvenliUrunler), tutar, kazanilanPuan]
+        JSON.stringify(guvenliUrunler), tutar, kazanilanPuan, idempotencyAnahtari]
     );
+    if (!sonuc.rows.length && idempotencyAnahtari) {
+      sonuc = await baglanti.query(
+        `SELECT * FROM odeme_islemleri
+         WHERE isletme_id=$1 AND idempotency_kapsam='odeme-taslagi' AND idempotency_anahtar=$2`,
+        [tenantId, idempotencyAnahtari]
+      );
+      await baglanti.query("COMMIT");
+      return odemeDonustur(sonuc.rows[0]);
+    }
     await siparisStogunuIsle(baglanti, tenantId, id, guvenliUrunler, { rezervasyon: true });
     await baglanti.query("COMMIT");
     return odemeDonustur(sonuc.rows[0]);
@@ -845,8 +881,16 @@ export async function nakitMasasiniAc(isletmeId, masaNo, kullaniciId) {
   return nakitMasaDurumunuGetir(tenantId, guvenliMasaNo);
 }
 
-export async function nakitSiparisOlustur(isletmeId, { kullaniciId = null, masaNo, urunler, kisiAdi = "Misafir" }) {
+export async function nakitSiparisOlustur(isletmeId, { kullaniciId = null, masaNo, urunler, kisiAdi = "Misafir", idempotencyAnahtari = null }) {
   const tenantId = isletmeIdZorunlu(isletmeId);
+  if (idempotencyAnahtari) {
+    const mevcut = await pool.query(
+      `SELECT * FROM odeme_islemleri
+       WHERE isletme_id=$1 AND idempotency_kapsam='nakit-siparis' AND idempotency_anahtar=$2`,
+      [tenantId, idempotencyAnahtari]
+    );
+    if (mevcut.rows[0]) return odemeDonustur(mevcut.rows[0]);
+  }
   const guvenliMasaNo = nakitMasaNoDogrula(masaNo);
   await suresiDolanStoklariBirak(pool, tenantId);
   const guvenliUrunler = await odemeUrunleriniDogrula(tenantId, urunler, kullaniciId);
@@ -862,16 +906,25 @@ export async function nakitSiparisOlustur(isletmeId, { kullaniciId = null, masaN
     if (masa.rows[0]?.aktif !== true) throw new Error("Bu masa nakit siparişe açık değil. Personelden masayı açmasını isteyin.");
     const id = randomUUID();
     const siparisNo = `BP-N-${Date.now()}-${randomUUID().slice(0, 8)}`;
-    const sonuc = await baglanti.query(
+    let sonuc = await baglanti.query(
       `INSERT INTO odeme_islemleri
         (isletme_id,id,kullanici_id,siparis_no,masa_no,siparis_tipi,yontem,kisi_adi,
-         urunler,tutar,kazanilan_puan,saglayici,durum,son_gecerlilik)
-       VALUES ($1,$2,$3,$4,$5,'masa','tam',$6,$7::jsonb,$8,$9,'nakit','personel_onayi',NOW()+INTERVAL '6 hours')
+         urunler,tutar,kazanilan_puan,saglayici,durum,son_gecerlilik,idempotency_kapsam,idempotency_anahtar)
+       VALUES ($1,$2,$3,$4,$5,'masa','tam',$6,$7::jsonb,$8,$9,'nakit','personel_onayi',NOW()+INTERVAL '6 hours','nakit-siparis',$10)
+       ON CONFLICT (isletme_id,idempotency_kapsam,idempotency_anahtar)
+         WHERE idempotency_kapsam IS NOT NULL AND idempotency_anahtar IS NOT NULL DO NOTHING
        RETURNING *`,
       [tenantId, id, kullaniciId, siparisNo, guvenliMasaNo,
         String(kisiAdi || "Misafir").trim().slice(0, 120) || "Misafir",
-        JSON.stringify(guvenliUrunler), tutar, kazanilanPuan]
+        JSON.stringify(guvenliUrunler), tutar, kazanilanPuan, idempotencyAnahtari]
     );
+    if (!sonuc.rows.length && idempotencyAnahtari) {
+      sonuc = await baglanti.query(
+        `SELECT * FROM odeme_islemleri
+         WHERE isletme_id=$1 AND idempotency_kapsam='nakit-siparis' AND idempotency_anahtar=$2`,
+        [tenantId, idempotencyAnahtari]
+      );
+    }
     await baglanti.query("COMMIT");
     return odemeDonustur(sonuc.rows[0]);
   } catch (e) {
@@ -1134,16 +1187,49 @@ export async function odemeGetir(isletmeId, id) {
   return sonuc.rows[0] ? odemeDonustur(sonuc.rows[0]) : null;
 }
 
-export async function odemeSaglayiciTokenKaydet(isletmeId, id, token) {
+export async function odemeIyzicoBaslatiminiTalepEt(isletmeId, id) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const mevcut = await pool.query(
+    `SELECT saglayici_token,saglayici_sayfa_url,iyzico_baslatim_basladi
+     FROM odeme_islemleri WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor'`,
+    [tenantId, id]
+  );
+  if (!mevcut.rows.length) throw new Error("Odeme taslagi odeme baslatmak icin uygun degil.");
+  if (mevcut.rows[0].saglayici_token && mevcut.rows[0].saglayici_sayfa_url) {
+    return { durum: "tamamlandi", paymentPageUrl: mevcut.rows[0].saglayici_sayfa_url };
+  }
+  const alinan = await pool.query(
+    `UPDATE odeme_islemleri
+     SET iyzico_baslatim_basladi=NOW(),guncelleme=NOW()
+     WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor'
+       AND saglayici_token IS NULL
+       AND (iyzico_baslatim_basladi IS NULL OR iyzico_baslatim_basladi < NOW()-INTERVAL '5 minutes')
+     RETURNING id`,
+    [tenantId, id]
+  );
+  return { durum: alinan.rows.length ? "alindi" : "isleniyor" };
+}
+
+export async function odemeIyzicoBaslatiminiBirak(isletmeId, id) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  await pool.query(
+    `UPDATE odeme_islemleri SET iyzico_baslatim_basladi=NULL,guncelleme=NOW()
+     WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor' AND saglayici_token IS NULL`,
+    [tenantId, id]
+  );
+}
+
+export async function odemeSaglayiciTokenKaydet(isletmeId, id, token, paymentPageUrl) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
     const sonuc = await baglanti.query(
       `UPDATE odeme_islemleri SET saglayici='iyzico', saglayici_token=$3,
+         saglayici_sayfa_url=$4, iyzico_baslatim_basladi=NULL,
          son_gecerlilik=NOW()+INTERVAL '60 minutes', guncelleme=NOW()
        WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor' AND son_gecerlilik > NOW() RETURNING *`,
-      [tenantId, id, token]
+      [tenantId, id, token, paymentPageUrl]
     );
     if (!sonuc.rows.length) throw new Error("Ödeme taslağı ödeme başlatmak için uygun değil.");
     await baglanti.query(
@@ -1180,7 +1266,39 @@ export async function iyzicoTokeniyleOdemeGetir(token) {
 export async function odemeMutfagaAktarildi(isletmeId, id) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   await pool.query(
-    "UPDATE odeme_islemleri SET mutfaga_aktarildi=true, guncelleme=NOW() WHERE isletme_id=$1 AND id=$2 AND durum IN ('basarili','nakit_bekliyor')",
+    "UPDATE odeme_islemleri SET mutfaga_aktarildi=true, mutfaga_aktarim_basladi=NULL, guncelleme=NOW() WHERE isletme_id=$1 AND id=$2 AND durum IN ('basarili','nakit_bekliyor')",
+    [tenantId, id]
+  );
+}
+
+export async function odemeMutfakAktariminiTalepEt(isletmeId, id) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const talep = await pool.query(
+    `UPDATE odeme_islemleri
+     SET mutfaga_aktarim_basladi=NOW(),guncelleme=NOW()
+     WHERE isletme_id=$1 AND id=$2 AND durum IN ('basarili','nakit_bekliyor')
+       AND mutfaga_aktarildi=false
+       AND (mutfaga_aktarim_basladi IS NULL OR mutfaga_aktarim_basladi < NOW()-INTERVAL '5 minutes')
+     RETURNING *`,
+    [tenantId, id]
+  );
+  if (talep.rows[0]) return { durum: "alindi", odeme: odemeDonustur(talep.rows[0]) };
+  const mevcut = await pool.query(
+    "SELECT * FROM odeme_islemleri WHERE isletme_id=$1 AND id=$2",
+    [tenantId, id]
+  );
+  if (!mevcut.rows[0]) throw new Error("Ödeme taslağı bulunamadı.");
+  return {
+    durum: mevcut.rows[0].mutfaga_aktarildi ? "tamamlandi" : "isleniyor",
+    odeme: odemeDonustur(mevcut.rows[0]),
+  };
+}
+
+export async function odemeMutfakAktariminiBirak(isletmeId, id) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  await pool.query(
+    `UPDATE odeme_islemleri SET mutfaga_aktarim_basladi=NULL,guncelleme=NOW()
+     WHERE isletme_id=$1 AND id=$2 AND mutfaga_aktarildi=false`,
     [tenantId, id]
   );
 }

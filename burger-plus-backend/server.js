@@ -28,6 +28,8 @@ import pool, {
   odemeCuzdanlaOnayla,
   odemeGetir,
   odemeSaglayiciTokenKaydet,
+  odemeIyzicoBaslatiminiTalepEt,
+  odemeIyzicoBaslatiminiBirak,
   odemeSaglayiciTokeniniGetir,
   iyzicoTokeniyleOdemeGetir,
   odemeMutfagaAktarildi,
@@ -40,6 +42,8 @@ import pool, {
   nakitSiparisiTahsilEt,
   suresiDolanStokRezervasyonlariniBirak,
   siparisStogunuKesinlestir,
+  odemeMutfakAktariminiTalepEt,
+  odemeMutfakAktariminiBirak,
 } from "./db.js";
 import { iyzicoCheckoutBaslat, iyzicoSonucuGetir, iyzicoDonusAdresi } from "./iyzico.js";
 import {
@@ -155,6 +159,11 @@ import {
   basvuruTablosunuHazirla, landingBasvurusuOlustur,
   superBasvurulariGetir, superBasvuruOzetiniGetir, superBasvuruGuncelle,
 } from "./basvuruDb.js";
+import {
+  idempotencyIstegiOzeti,
+  idempotencyTablosunuHazirla,
+  idempotentIslemCalistir,
+} from "./idempotency.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -204,7 +213,8 @@ const corsAyarlari = {
     callback(hata);
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Isletme", "X-Masa-Token", "X-Masa-Oturum"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Isletme", "X-Masa-Token", "X-Masa-Oturum", "Idempotency-Key"],
+  exposedHeaders: ["Idempotency-Key", "Idempotency-Replayed"],
   maxAge: 600,
   optionsSuccessStatus: 204,
 };
@@ -712,23 +722,55 @@ app.get("/api/sadakat-ayari", async (req, res) => {
   res.json({ damgaKarti: await sadakatAyariniGetir(req.isletme.id, pool) });
 });
 
+function idempotencyAktoru(req, yedekTur, yedekId) {
+  if (req.kullanici?.id) return { aktorTuru: "kullanici", aktorId: String(req.kullanici.id) };
+  return { aktorTuru: yedekTur, aktorId: String(yedekId || "anonim") };
+}
+
+async function idempotentYanitiGonder(req, res, kapsam, aktor, islem) {
+  const anahtar = req.get("Idempotency-Key");
+  const sonuc = await idempotentIslemCalistir(pool, {
+    isletmeId: req.isletme.id,
+    kapsam,
+    anahtar,
+    ...aktor,
+    istekOzeti: idempotencyIstegiOzeti({
+      metot: req.method,
+      yol: String(req.originalUrl || req.path).split("?")[0],
+      govde: req.body ?? null,
+    }),
+  }, () => islem(String(anahtar).trim()));
+  res.set("Idempotency-Key", String(anahtar).trim());
+  res.set("Idempotency-Replayed", sonuc.tekrar ? "true" : "false");
+  return res.status(sonuc.durumKodu).json(sonuc.govde);
+}
+
 // Ödeme sağlayıcısı bağlanmadan önce de sipariş ve tutar backend'de güvenli
 // taslak olarak hazırlanır. İyzico entegrasyonunda yalnızca onay endpointi
 // değişecek; taslak ve mutfağa aktarım akışı aynı kalacak.
 app.post("/api/odeme/taslak", opsiyonelKullaniciMiddleware(), async (req, res) => {
   try {
     const kullanici = req.kullanici || null;
-    const kisiAdi = kullanici ? `${kullanici.ad} ${kullanici.soyad}` : "Misafir";
-    const odeme = await odemeTaslagiOlustur(req.isletme.id, {
-      kullaniciId: kullanici?.id || null,
-      masaNo: req.body?.masaNo || null,
-      yontem: req.body?.yontem,
-      urunler: req.body?.urunler,
-      kisiAdi,
-    });
-    res.status(201).json({ odeme });
+    await idempotentYanitiGonder(
+      req,
+      res,
+      "odeme-taslagi",
+      idempotencyAktoru(req, req.body?.masaNo ? "masa" : "misafir", req.body?.masaNo || "algotur"),
+      async (istekAnahtari) => {
+        const kisiAdi = kullanici ? `${kullanici.ad} ${kullanici.soyad}` : "Misafir";
+        const odeme = await odemeTaslagiOlustur(req.isletme.id, {
+          kullaniciId: kullanici?.id || null,
+          masaNo: req.body?.masaNo || null,
+          yontem: req.body?.yontem,
+          urunler: req.body?.urunler,
+          kisiAdi,
+          idempotencyAnahtari: istekAnahtari,
+        });
+        return { durumKodu: 201, govde: { odeme } };
+      },
+    );
   } catch (e) {
-    res.status(400).json({ hata: istemciHataMesaji(e, "Ödeme taslağı oluşturulamadı.") });
+    res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Ödeme taslağı oluşturulamadı."), ...(e.kod ? { kod: e.kod } : {}) });
   }
 });
 
@@ -739,47 +781,87 @@ app.post("/api/odeme/:id/simulasyon-onay", opsiyonelKullaniciMiddleware(), async
     return res.status(404).json({ hata: "Kaynak bulunamadi." });
   }
   try {
-    const sonuc = await odemeSimulasyonOnayla(req.isletme.id, req.params.id, req.kullanici?.id || null);
-    const odeme = sonuc.odeme;
-    await onaylananOdemeyiMutfagaAktar(odeme);
-    res.json({ odeme: { ...odeme, mutfagaAktarildi: true } });
+    await idempotentYanitiGonder(
+      req, res, "odeme-simulasyon-onay",
+      idempotencyAktoru(req, "odeme", req.params.id),
+      async () => {
+        const sonuc = await odemeSimulasyonOnayla(req.isletme.id, req.params.id, req.kullanici?.id || null);
+        const odeme = sonuc.odeme;
+        await onaylananOdemeyiMutfagaAktar(odeme);
+        return { durumKodu: 200, govde: { odeme: { ...odeme, mutfagaAktarildi: true } } };
+      },
+    );
   } catch (e) {
-    res.status(400).json({ hata: istemciHataMesaji(e, "Test ödemesi onaylanamadı.") });
+    res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Test ödemesi onaylanamadı."), ...(e.kod ? { kod: e.kod } : {}) });
   }
 });
 
 app.post("/api/odeme/:id/cuzdan-onay", korumaliMiddleware(), async (req, res) => {
   try {
-    const ayar = await cuzdanAyariniGetir(req.isletme.id, pool);
-    if (!ayar.aktif) return res.status(403).json({ hata: "Cüzdan ödemeleri şu anda kullanılamıyor." });
-    const sonuc = await odemeCuzdanlaOnayla(req.isletme.id, req.params.id, req.kullanici.id);
-    const odeme = sonuc.odeme;
-    await onaylananOdemeyiMutfagaAktar(odeme);
-    res.json({ odeme: { ...odeme, mutfagaAktarildi: true }, cuzdan: await cuzdanOzetiniGetir(req.isletme.id, pool, req.kullanici.id) });
+    await idempotentYanitiGonder(
+      req, res, "odeme-cuzdan-onay", idempotencyAktoru(req, "odeme", req.params.id),
+      async () => {
+        const ayar = await cuzdanAyariniGetir(req.isletme.id, pool);
+        if (!ayar.aktif) {
+          const hata = new Error("Cüzdan ödemeleri şu anda kullanılamıyor.");
+          hata.status = 403;
+          throw hata;
+        }
+        const sonuc = await odemeCuzdanlaOnayla(req.isletme.id, req.params.id, req.kullanici.id);
+        const odeme = sonuc.odeme;
+        await onaylananOdemeyiMutfagaAktar(odeme);
+        const cuzdan = await cuzdanOzetiniGetir(req.isletme.id, pool, req.kullanici.id);
+        return { durumKodu: 200, govde: { odeme: { ...odeme, mutfagaAktarildi: true }, cuzdan } };
+      },
+    );
   } catch (e) {
-    res.status(400).json({ hata: istemciHataMesaji(e, "Cüzdan ödemesi tamamlanamadı.") });
+    res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Cüzdan ödemesi tamamlanamadı."), ...(e.kod ? { kod: e.kod } : {}) });
   }
 });
 
 app.post("/api/odeme/:id/iyzico-baslat", opsiyonelKullaniciMiddleware(), async (req, res) => {
   try {
-    const odeme = await odemeGetir(req.isletme.id, req.params.id);
-    if (!odeme) return res.status(404).json({ hata: "Ödeme taslağı bulunamadı." });
-    if (odeme.kullaniciId && !req.kullanici) return res.status(401).json({ hata: "Bu ödeme için giriş gerekli." });
-    if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
-      return res.status(403).json({ hata: "Bu ödeme taslağı başka bir hesaba ait." });
-    }
-    if (odeme.durum !== "bekliyor") return res.status(400).json({ hata: "Bu ödeme taslağı yeniden başlatılamaz." });
-    const form = await iyzicoCheckoutBaslat(odeme, req.body?.alici, req.ip);
-    await odemeSaglayiciTokenKaydet(req.isletme.id, odeme.id, form.token);
-    res.json({ paymentPageUrl: form.paymentPageUrl });
+    await idempotentYanitiGonder(
+      req, res, "iyzico-baslat", idempotencyAktoru(req, "odeme", req.params.id),
+      async () => {
+        const odeme = await odemeGetir(req.isletme.id, req.params.id);
+        if (!odeme) {
+          const hata = new Error("Ödeme taslağı bulunamadı."); hata.status = 404; throw hata;
+        }
+        if (odeme.kullaniciId && !req.kullanici) {
+          const hata = new Error("Bu ödeme için giriş gerekli."); hata.status = 401; throw hata;
+        }
+        if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
+          const hata = new Error("Bu ödeme taslağı başka bir hesaba ait."); hata.status = 403; throw hata;
+        }
+        if (odeme.durum !== "bekliyor") throw new Error("Bu ödeme taslağı yeniden başlatılamaz.");
+        const baslatim = await odemeIyzicoBaslatiminiTalepEt(req.isletme.id, odeme.id);
+        if (baslatim.durum === "tamamlandi") {
+          return { durumKodu: 200, govde: { paymentPageUrl: baslatim.paymentPageUrl } };
+        }
+        if (baslatim.durum !== "alindi") {
+          const hata = new Error("Bu odeme icin odeme sayfasi zaten hazirlaniyor.");
+          hata.status = 409;
+          hata.kod = "PAYMENT_SESSION_IN_PROGRESS";
+          throw hata;
+        }
+        try {
+          const form = await iyzicoCheckoutBaslat(odeme, req.body?.alici, req.ip);
+          await odemeSaglayiciTokenKaydet(req.isletme.id, odeme.id, form.token, form.paymentPageUrl);
+          return { durumKodu: 200, govde: { paymentPageUrl: form.paymentPageUrl } };
+        } catch (hata) {
+          await odemeIyzicoBaslatiminiBirak(req.isletme.id, odeme.id).catch(() => {});
+          throw hata;
+        }
+      },
+    );
   } catch (e) {
     console.error("İyzico ödeme formu başlatılamadı:", {
       mesaj: e.message,
       kod: e.iyzicoKod || "yok",
       ortam: String(process.env.IYZICO_BASE_URL || "sandbox").trim(),
     });
-    res.status(400).json({ hata: istemciHataMesaji(e, "İyzico ödeme formu başlatılamadı.") });
+    res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "İyzico ödeme formu başlatılamadı."), ...(e.kod ? { kod: e.kod } : {}) });
   }
 });
 
@@ -807,23 +889,34 @@ app.post("/api/odeme/iyzico/callback", async (req, res) => {
 // token'ı sunucu tarafında İyzico'dan sorgulayarak ödemeyi güvenle kesinleştirir.
 app.post("/api/odeme/:id/iyzico-dogrula", opsiyonelKullaniciMiddleware(), async (req, res) => {
   try {
-    const odeme = await odemeGetir(req.isletme.id, req.params.id);
-    if (!odeme) return res.status(404).json({ hata: "Ödeme bulunamadı." });
-    if (odeme.kullaniciId && !req.kullanici) return res.status(401).json({ hata: "Bu ödeme için giriş gerekli." });
-    if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
-      return res.status(403).json({ hata: "Bu ödeme başka bir hesaba ait." });
-    }
-    if (odeme.durum === "basarili") {
-      await onaylananOdemeyiMutfagaAktarGuvenli(odeme);
-      return res.json({ odeme });
-    }
-    const token = await odemeSaglayiciTokeniniGetir(req.isletme.id, odeme.id);
-    if (!token) return res.status(409).json({ hata: "İyzico ödeme oturumu henüz hazır değil." });
-    const kesinlesen = await iyzicoOdemesiniKesinlestir(odeme, token);
-    res.json({ odeme: kesinlesen });
+    await idempotentYanitiGonder(
+      req, res, "iyzico-dogrula", idempotencyAktoru(req, "odeme", req.params.id),
+      async () => {
+        const odeme = await odemeGetir(req.isletme.id, req.params.id);
+        if (!odeme) {
+          const hata = new Error("Ödeme bulunamadı."); hata.status = 404; throw hata;
+        }
+        if (odeme.kullaniciId && !req.kullanici) {
+          const hata = new Error("Bu ödeme için giriş gerekli."); hata.status = 401; throw hata;
+        }
+        if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
+          const hata = new Error("Bu ödeme başka bir hesaba ait."); hata.status = 403; throw hata;
+        }
+        if (odeme.durum === "basarili") {
+          await onaylananOdemeyiMutfagaAktarGuvenli(odeme);
+          return { durumKodu: 200, govde: { odeme } };
+        }
+        const token = await odemeSaglayiciTokeniniGetir(req.isletme.id, odeme.id);
+        if (!token) {
+          const hata = new Error("İyzico ödeme oturumu henüz hazır değil."); hata.status = 409; throw hata;
+        }
+        const kesinlesen = await iyzicoOdemesiniKesinlestir(odeme, token);
+        return { durumKodu: 200, govde: { odeme: kesinlesen } };
+      },
+    );
   } catch (e) {
     console.error("İyzico ödeme yeniden doğrulama:", { odemeId: req.params.id, mesaj: e.message });
-    res.status(409).json({ hata: istemciHataMesaji(e, "Ödeme henüz doğrulanamadı.") });
+    res.status(e.status || 409).json({ hata: istemciHataMesaji(e, "Ödeme henüz doğrulanamadı."), ...(e.kod ? { kod: e.kod } : {}) });
   }
 });
 
@@ -880,7 +973,7 @@ const guvenli = (islem) => async (req, res) => {
     if (!res.headersSent) res.json(veri ?? { basarili: true });
   } catch (e) {
     console.error("Admin API:", e.message);
-    if (!res.headersSent) res.status(400).json({ hata: istemciHataMesaji(e, "İşlem tamamlanamadı.") });
+    if (!res.headersSent) res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "İşlem tamamlanamadı."), ...(e.kod ? { kod: e.kod } : {}) });
   }
 };
 
@@ -937,15 +1030,20 @@ app.get("/api/nakit/masa/:masaNo/durum", guvenli(async (req, res) => {
 
 app.post("/api/nakit/siparis", nakitSiparisLimiti, opsiyonelKullaniciMiddleware(), guvenli(async (req, res) => {
   const kullanici = req.kullanici || null;
-  const siparis = await nakitSiparisOlustur(req.isletme.id, {
-    kullaniciId: kullanici?.id || null,
-    masaNo: req.body?.masaNo,
-    urunler: req.body?.urunler,
-    kisiAdi: kullanici ? `${kullanici.ad} ${kullanici.soyad}`.trim() : "Misafir",
-  });
-  nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, siparis);
-  res.status(201);
-  return { siparis };
+  return idempotentYanitiGonder(
+    req, res, "nakit-siparis", idempotencyAktoru(req, "masa", req.body?.masaNo),
+    async (istekAnahtari) => {
+      const siparis = await nakitSiparisOlustur(req.isletme.id, {
+        kullaniciId: kullanici?.id || null,
+        masaNo: req.body?.masaNo,
+        urunler: req.body?.urunler,
+        kisiAdi: kullanici ? `${kullanici.ad} ${kullanici.soyad}`.trim() : "Misafir",
+        idempotencyAnahtari: istekAnahtari,
+      });
+      nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, siparis);
+      return { durumKodu: 201, govde: { siparis } };
+    },
+  );
 }));
 
 app.get("/api/nakit/masalar", salonRolu(), guvenli(async (req) => ({
@@ -958,24 +1056,30 @@ app.post("/api/nakit/masalar/:masaNo/ac", salonRolu(), guvenli(async (req) => {
   return { masa };
 }));
 
-app.post("/api/nakit/siparis/:id/onayla", salonRolu(), guvenli(async (req) => {
-  const siparis = await nakitSiparisiOnayla(req.isletme.id, req.params.id);
-  await onaylananOdemeyiMutfagaAktar(siparis);
-  nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, { ...siparis, durum: "nakit_bekliyor" });
-  return { siparis: { ...siparis, durum: "nakit_bekliyor", mutfagaAktarildi: true } };
+app.post("/api/nakit/siparis/:id/onayla", salonRolu(), guvenli(async (req, res) => {
+  return idempotentYanitiGonder(req, res, "nakit-siparis-onay", idempotencyAktoru(req, "personel", "bilinmiyor"), async () => {
+    const siparis = await nakitSiparisiOnayla(req.isletme.id, req.params.id);
+    await onaylananOdemeyiMutfagaAktar(siparis);
+    nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, { ...siparis, durum: "nakit_bekliyor" });
+    return { durumKodu: 200, govde: { siparis: { ...siparis, durum: "nakit_bekliyor", mutfagaAktarildi: true } } };
+  });
 }));
 
-app.post("/api/nakit/siparis/:id/reddet", salonRolu(), guvenli(async (req) => {
-  const siparis = await nakitSiparisiReddet(req.isletme.id, req.params.id);
-  nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, siparis);
-  return { siparis };
+app.post("/api/nakit/siparis/:id/reddet", salonRolu(), guvenli(async (req, res) => {
+  return idempotentYanitiGonder(req, res, "nakit-siparis-red", idempotencyAktoru(req, "personel", "bilinmiyor"), async () => {
+    const siparis = await nakitSiparisiReddet(req.isletme.id, req.params.id);
+    nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, siparis);
+    return { durumKodu: 200, govde: { siparis } };
+  });
 }));
 
-app.post("/api/nakit/siparis/:id/tahsil", salonRolu(), guvenli(async (req) => {
-  const sonuc = await nakitSiparisiTahsilEt(req.isletme.id, req.params.id);
-  const siparis = sonuc.odeme;
-  nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, siparis);
-  return { siparis };
+app.post("/api/nakit/siparis/:id/tahsil", salonRolu(), guvenli(async (req, res) => {
+  return idempotentYanitiGonder(req, res, "nakit-siparis-tahsil", idempotencyAktoru(req, "personel", "bilinmiyor"), async () => {
+    const sonuc = await nakitSiparisiTahsilEt(req.isletme.id, req.params.id);
+    const siparis = sonuc.odeme;
+    nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, siparis);
+    return { durumKodu: 200, govde: { siparis } };
+  });
 }));
 
 app.get("/api/kasa/cuzdan/musteriler", salonRolu(), guvenli(async (req) => ({
@@ -1610,32 +1714,40 @@ async function onaylananOdemeyiMutfagaAktar(odeme) {
   if (odeme.mutfagaAktarildi) return;
   const tenantId = Number(odeme.isletmeId);
   if (!Number.isSafeInteger(tenantId) || tenantId < 1) throw new Error("Ödemeye ait işletme bilgisi geçersiz.");
-  const masaNo = odeme.masaNo || "algotur";
-  await masaSirayaAl(tenantId, masaNo, async () => {
-    await siparisStogunuKesinlestir(tenantId, odeme.id, odeme.urunler);
-    io.to(oda(tenantId, "genel")).emit("urunler-guncellendi", await urunleriGetir(tenantId));
-    for (const [kalemNo, urun] of odeme.urunler.entries()) {
-      await kalemEkle(
-        tenantId, masaNo, urun, odeme.kisiAdi, urun.secimler, urun.haricMalzemeler,
-        odeme.siparisNo, odeme.id, kalemNo
-      );
-    }
-    await odemeMutfagaAktarildi(tenantId, odeme.id);
-    const tumMasalar = await tumAcikMasalar(tenantId);
-    io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-guncellendi", await masaSiparisleriniGetir(tenantId, masaNo));
-    io.to(oda(tenantId, "mutfak")).emit("mutfak-guncellendi", tumMasalar);
-    io.to(oda(tenantId, "salon")).emit("salon-guncellendi", tumMasalar);
-    io.to(oda(tenantId, "yonetim")).emit("yonetim-satis-guncellendi", {
-      siparisNo: odeme.siparisNo,
-      masaNo: odeme.masaNo || "algotur",
-      kisiAdi: odeme.kisiAdi,
-      tutar: odeme.tutar,
-      urunAdedi: odeme.urunler.reduce((toplam, urun) => toplam + Math.max(1, Number(urun.adet || 1)), 0),
-      urunler: odeme.urunler.map((urun) => ({ ad: urun.ad, adet: Math.max(1, Number(urun.adet || 1)), fiyat: urun.fiyat })),
-      durum: "yeni",
-      olusturma: new Date().toISOString(),
+  const aktarim = await odemeMutfakAktariminiTalepEt(tenantId, odeme.id);
+  if (aktarim.durum !== "alindi") return;
+  const aktarilacak = aktarim.odeme;
+  const masaNo = aktarilacak.masaNo || "algotur";
+  try {
+    await masaSirayaAl(tenantId, masaNo, async () => {
+      await siparisStogunuKesinlestir(tenantId, aktarilacak.id, aktarilacak.urunler);
+      io.to(oda(tenantId, "genel")).emit("urunler-guncellendi", await urunleriGetir(tenantId));
+      for (const [kalemNo, urun] of aktarilacak.urunler.entries()) {
+        await kalemEkle(
+          tenantId, masaNo, urun, aktarilacak.kisiAdi, urun.secimler, urun.haricMalzemeler,
+          aktarilacak.siparisNo, aktarilacak.id, kalemNo
+        );
+      }
+      await odemeMutfagaAktarildi(tenantId, aktarilacak.id);
+      const tumMasalar = await tumAcikMasalar(tenantId);
+      io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-guncellendi", await masaSiparisleriniGetir(tenantId, masaNo));
+      io.to(oda(tenantId, "mutfak")).emit("mutfak-guncellendi", tumMasalar);
+      io.to(oda(tenantId, "salon")).emit("salon-guncellendi", tumMasalar);
+      io.to(oda(tenantId, "yonetim")).emit("yonetim-satis-guncellendi", {
+        siparisNo: aktarilacak.siparisNo,
+        masaNo: aktarilacak.masaNo || "algotur",
+        kisiAdi: aktarilacak.kisiAdi,
+        tutar: aktarilacak.tutar,
+        urunAdedi: aktarilacak.urunler.reduce((toplam, urun) => toplam + Math.max(1, Number(urun.adet || 1)), 0),
+        urunler: aktarilacak.urunler.map((urun) => ({ ad: urun.ad, adet: Math.max(1, Number(urun.adet || 1)), fiyat: urun.fiyat })),
+        durum: "yeni",
+        olusturma: new Date().toISOString(),
+      });
     });
-  });
+  } catch (hata) {
+    await odemeMutfakAktariminiBirak(tenantId, aktarilacak.id).catch(() => {});
+    throw hata;
+  }
 }
 
 // --- Socket.io ---
@@ -1882,6 +1994,7 @@ isletmeTablosunuHazirla()
     varsayilanIsletmeId = isletme.id;
     return tablolariHazirla(varsayilanIsletmeId);
   })
+  .then(() => idempotencyTablosunuHazirla(pool))
   .then(() => adminTablolariHazirla(varsayilanIsletmeId))
   .then(() => sadakatTablolariHazirla(varsayilanIsletmeId, pool))
   .then(() => cuzdanTablolariHazirla(pool))

@@ -78,6 +78,35 @@ Mutfak: `mutfaga-katil`, `masa-durum-degistir`({masaNo,durum}) · dinle: `mutfak
 - `GET /api/masa/:masaNo` → bir masanın siparişi (`X-Masa-Token` başlığı zorunlu)
 - `GET /api/mutfak` → tüm açık masalar
 
+### Idempotency sözleşmesi
+
+Sipariş veya ödeme oluşturan/değiştiren kritik `POST` istekleri
+`Idempotency-Key` başlığı ister. İstemci her mantıksal işlem için bir UUID üretir
+ve ağ hatasında **aynı gövdeyle aynı anahtarı** yeniden kullanır. Yeni bir kullanıcı
+aksiyonu için yeni anahtar üretilir.
+
+```http
+POST /api/odeme/taslak
+Idempotency-Key: order:550e8400-e29b-41d4-a716-446655440000
+```
+
+- Anahtar 8-128 karakterdir; harf, rakam, `.`, `_`, `:`, `-` kullanılabilir.
+- Aynı anahtar + aynı istek tamamlandıysa kaydedilen HTTP kodu ve JSON yanıtı döner.
+- Tekrar yanıtında `Idempotency-Replayed: true` başlığı bulunur.
+- Aynı anahtar farklı gövde, kullanıcı veya masa ile kullanılırsa `409` döner.
+- Aynı işlem hâlen sürüyorsa istek en fazla 20 saniye sonucu bekler; devam
+  ediyorsa `IDEMPOTENCY_IN_PROGRESS` ile `409` döner ve aynı anahtarla tekrar denenir.
+- Başarısız işlem aynı anahtar ve aynı gövdeyle yeniden denenebilir. Tamamlanan
+  yanıt kayıtları 24 saat saklanır.
+
+Kapsamdaki uçlar: ödeme taslağı, simülasyon/cüzdan onayı, iyzico başlatma ve
+doğrulama, nakit sipariş oluşturma/onaylama/reddetme/tahsil etme. iyzico callback'i
+sağlayıcı tokenı ve ödeme satırındaki atomik durum geçişiyle; mutfak aktarımı ise
+veritabanındaki aktarım talebiyle ayrıca tekilleştirilir.
+İyzico ödeme sayfası başlatılırken ödeme satırı atomik olarak sahiplenilir; oluşan
+sağlayıcı tokenı ve sayfa adresi kalıcı tutulduğu için farklı HTTP anahtarlarıyla
+gelen eşzamanlı başlatma istekleri de ikinci bir sağlayıcı oturumu oluşturamaz.
+
 Masa numarası tek başına erişim sağlamaz. İşletme admini veya super admin
 tarafından üretilen QR kodu, işletme ve masa numarasına bağlı imzalı bir erişim
 anahtarı taşır. Eski `?no=3` biçimindeki QR kodları geçersizdir ve yeniden
