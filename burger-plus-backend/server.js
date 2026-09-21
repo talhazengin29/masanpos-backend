@@ -82,6 +82,7 @@ import {
   eksikCevirileriTamamla,
 } from "./adminDb.js";
 import { ceviriYapilandirmasi } from "./ceviri.js";
+import { operasyonNabziniGetir } from "./operasyonDb.js";
 import {
   gorselYukle, logoYukle, temaArkaPlaniYukle, storageDosyasiniSil,
   sikayetGorseliYukle, sikayetGorseliKullaniciyaAitMi,
@@ -1329,6 +1330,7 @@ app.use("/api/admin", (req, res, next) => {
 });
 
 app.get("/api/admin/dashboard", admin, guvenli((req) => dashboardGetir(req.isletme.id)));
+app.get("/api/admin/operasyon-nabzi", admin, guvenli((req) => operasyonNabziniGetir(req.isletme.id)));
 app.get("/api/admin/degerlendirmeler", admin, guvenli(async (req) => ({
   rapor: await adminDegerlendirmeRaporunuGetir(req.isletme.id, pool, req.query?.gun),
 })));
