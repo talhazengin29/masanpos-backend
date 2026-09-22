@@ -2,6 +2,8 @@ import pool, { davetKoduUret } from "./db.js";
 import bcrypt from "bcryptjs";
 import { ingilizceCeviriUret } from "./ceviri.js";
 import { urunMalzemeleriniRecetedenGuncelle } from "./receteDb.js";
+import { otomatikOnerileriSirala } from "./oneriMotoru.js";
+import { kampanyaTaslagiOlustur } from "./kampanyaTaslagi.js";
 
 function isletmeIdZorunlu(isletmeId) {
   const id = Number(isletmeId);
@@ -298,6 +300,7 @@ export async function adminTablolariHazirla(isletmeId) {
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazirlamaya_baslandi TIMESTAMPTZ");
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazir_at TIMESTAMPTZ");
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazirlayan_personel_id INTEGER");
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS oneri_adedi INTEGER NOT NULL DEFAULT 0");
   await pool.query("ALTER TABLE oturumlar ADD COLUMN IF NOT EXISTS kapandi_at TIMESTAMPTZ");
   await pool.query("ALTER TABLE oturumlar ADD COLUMN IF NOT EXISTS kapatan_personel_id INTEGER");
   await pool.query(`
@@ -331,6 +334,8 @@ export async function adminTablolariHazirla(isletmeId) {
       ON siparis_kalemleri (olusturma DESC, hazirlamaya_baslandi, hazir_at);
     CREATE INDEX IF NOT EXISTS siparis_kalemleri_isletme_tarih_idx
       ON siparis_kalemleri (isletme_id, olusturma DESC);
+    CREATE INDEX IF NOT EXISTS siparis_kalemleri_oneri_tarih_idx
+      ON siparis_kalemleri (isletme_id, olusturma DESC) WHERE oneri_adedi > 0;
   `);
   await pool.query(`
     ALTER TABLE kategoriler DROP CONSTRAINT IF EXISTS kategoriler_ad_key;
@@ -673,16 +678,42 @@ export async function onerileriGetir(isletmeId, sepetUrunIdleri) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sepetIdleri = [...new Set((Array.isArray(sepetUrunIdleri) ? sepetUrunIdleri : []).map(Number).filter((id) => Number.isInteger(id) && id > 0))].slice(0, 30);
   if (!sepetIdleri.length) return [];
-  const sonuc = await pool.query(
-    "SELECT onerilen_urunler FROM urunler WHERE isletme_id=$1 AND id=ANY($2::int[]) AND aktif=true AND arsivli=false",
-    [tenantId, sepetIdleri]
-  );
-  const adayIdler = [...new Set(sonuc.rows.flatMap((urun) => Array.isArray(urun.onerilen_urunler) ? urun.onerilen_urunler : []).map(Number).filter(Number.isInteger))]
-    .filter((id) => !sepetIdleri.includes(id));
-  if (!adayIdler.length) return [];
-  const katalog = await urunleriGetir(tenantId);
-  const urunHaritasi = new Map(katalog.map((urun) => [Number(urun.id), urun]));
-  return adayIdler.map((id) => urunHaritasi.get(id)).filter(Boolean).slice(0, 3);
+  const [manuelSonucu, istatistikSonucu, katalog] = await Promise.all([
+    pool.query(
+      "SELECT id,onerilen_urunler FROM urunler WHERE isletme_id=$1 AND id=ANY($2::int[]) AND aktif=true AND arsivli=false",
+      [tenantId, sepetIdleri],
+    ),
+    pool.query(`
+      WITH gecmis AS (
+        SELECT COALESCE(siparis_no,'oturum-'||oturum_id::text) siparis_anahtari,urun_id,SUM(adet)::int adet
+        FROM siparis_kalemleri
+        WHERE isletme_id=$1 AND olusturma>=NOW()-INTERVAL '120 days'
+        GROUP BY COALESCE(siparis_no,'oturum-'||oturum_id::text),urun_id
+      ), sepet_siparisleri AS (
+        SELECT DISTINCT siparis_anahtari FROM gecmis WHERE urun_id=ANY($2::int[])
+      )
+      SELECT g.urun_id,
+        COUNT(*) FILTER (WHERE s.siparis_anahtari IS NOT NULL)::int birlikte_siparis,
+        COUNT(*)::int toplam_siparis,
+        (SELECT COUNT(*)::int FROM sepet_siparisleri) sepet_siparisi
+      FROM gecmis g
+      LEFT JOIN sepet_siparisleri s ON s.siparis_anahtari=g.siparis_anahtari
+      WHERE NOT (g.urun_id=ANY($2::int[]))
+      GROUP BY g.urun_id
+    `, [tenantId, sepetIdleri]),
+    urunleriGetir(tenantId),
+  ]);
+  const manuelOneriIdleri = manuelSonucu.rows
+    .flatMap((urun) => Array.isArray(urun.onerilen_urunler) ? urun.onerilen_urunler : [])
+    .map(Number)
+    .filter(Number.isInteger);
+  return otomatikOnerileriSirala({
+    urunler: katalog,
+    sepetUrunIdleri: sepetIdleri,
+    istatistikler: istatistikSonucu.rows,
+    manuelOneriIdleri,
+    limit: 3,
+  });
 }
 
 export async function urunAktiflikDegistir(isletmeId, id, aktif) {
@@ -853,6 +884,38 @@ export async function kampanyalariGetir(isletmeId, { tumu = false } = {}) {
   return sonuc.rows.map(kampanyayiDonustur);
 }
 
+export async function kampanyaTaslagiGetir(isletmeId, gun = 30) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const aralik = Math.floor(Math.min(90, Math.max(7, sayi(gun, 30))));
+  const [kategoriIstatistikleri, saatlik] = await Promise.all([
+    pool.query(`
+      SELECT u.kategori,COUNT(DISTINCT u.id)::int aktif_urun,
+        COALESCE(SUM(k.adet),0)::int adet,COALESCE(SUM(k.fiyat*k.adet),0) ciro,
+        COALESCE(SUM(LEAST(k.adet,k.oneri_adedi)),0)::int oneri_adedi,
+        COALESCE(SUM(k.fiyat*LEAST(k.adet,k.oneri_adedi)),0) oneri_cirosu,
+        COALESCE(SUM(k.adet) FILTER (WHERE u.urun_tipi IN ('yan_lezzet','icecek','diger')),0)::int tamamlayici_adet
+      FROM urunler u
+      JOIN kategoriler c ON c.isletme_id=$1 AND c.ad=u.kategori AND c.aktif=true AND c.arsivli=false
+      LEFT JOIN siparis_kalemleri k ON k.isletme_id=$1 AND k.urun_id=u.id
+        AND k.olusturma>=NOW()-($2::text || ' days')::interval
+      WHERE u.isletme_id=$1 AND u.aktif=true AND u.arsivli=false
+      GROUP BY u.kategori
+    `, [tenantId, aralik]),
+    pool.query(`
+      SELECT EXTRACT(HOUR FROM olusturma)::int saat,
+        COUNT(DISTINCT COALESCE(siparis_no,id::text))::int siparis
+      FROM siparis_kalemleri
+      WHERE isletme_id=$1 AND olusturma>=NOW()-($2::text || ' days')::interval
+      GROUP BY 1 ORDER BY 1
+    `, [tenantId, aralik]),
+  ]);
+  return kampanyaTaslagiOlustur({
+    kategoriIstatistikleri: kategoriIstatistikleri.rows,
+    saatlik: saatlik.rows,
+    gun: aralik,
+  });
+}
+
 export async function kampanyaKaydet(isletmeId, veri) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const id = veri.id == null || veri.id === "" ? null : Number(veri.id);
@@ -917,6 +980,8 @@ export async function dashboardGetir(isletmeId) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const [satis, personel, populer, hazirlik] = await Promise.all([
     pool.query(`SELECT COALESCE(SUM(fiyat*adet),0) toplam,
+      COALESCE(SUM(fiyat*LEAST(adet,oneri_adedi)),0) oneri_cirosu,
+      COALESCE(SUM(LEAST(adet,oneri_adedi)),0)::int oneri_adedi,
       COUNT(DISTINCT COALESCE(siparis_no, id::text)) siparis_sayisi
       FROM siparis_kalemleri WHERE isletme_id=$1 AND olusturma >= date_trunc('day',NOW())`, [tenantId]),
     pool.query("SELECT COUNT(*) FILTER (WHERE aktif) toplam, (SELECT COUNT(*) FROM vardiyalar WHERE isletme_id=$1 AND cikis IS NULL) vardiyada FROM personeller WHERE isletme_id=$1", [tenantId]),
@@ -933,6 +998,8 @@ export async function dashboardGetir(isletmeId) {
   ]);
   return {
     bugunCiro: Number(satis.rows[0].toplam),
+    bugunOneriCirosu: Number(satis.rows[0].oneri_cirosu),
+    bugunOneriAdedi: Number(satis.rows[0].oneri_adedi),
     bugunSiparis: Number(satis.rows[0].siparis_sayisi),
     personel: Number(personel.rows[0].toplam),
     vardiyada: Number(personel.rows[0].vardiyada),
@@ -957,6 +1024,8 @@ export async function satisRaporuGetir(isletmeId, gun = 30) {
   const aralik = Math.min(365, Math.max(1, sayi(gun, 30)));
   const [gunluk, urunler, kategoriler, saatlik, haftalik, ozet, oncekiOzet] = await Promise.all([
     pool.query(`SELECT date_trunc('day',olusturma)::date gun, SUM(fiyat*adet) ciro, SUM(adet) adet,
+        COALESCE(SUM(fiyat*LEAST(adet,oneri_adedi)),0) oneri_cirosu,
+        COALESCE(SUM(LEAST(adet,oneri_adedi)),0)::int oneri_adedi,
         COUNT(DISTINCT COALESCE(siparis_no,id::text))::int siparis
       FROM siparis_kalemleri WHERE isletme_id=$1 AND olusturma >= NOW()-($2::text || ' days')::interval
       GROUP BY 1 ORDER BY 1`, [tenantId, aralik]),
@@ -977,24 +1046,34 @@ export async function satisRaporuGetir(isletmeId, gun = 30) {
       GROUP BY 1 ORDER BY 1`, [tenantId, aralik]),
     // Genel dönem toplamı: ürün adedinden bağımsız gerçek sipariş sayısı burada çıkar (ortalama sepet tutarı için).
     pool.query(`SELECT COALESCE(SUM(fiyat*adet),0) ciro, COALESCE(SUM(adet),0)::int adet,
+        COALESCE(SUM(fiyat*LEAST(adet,oneri_adedi)),0) oneri_cirosu,
+        COALESCE(SUM(LEAST(adet,oneri_adedi)),0)::int oneri_adedi,
+        COUNT(DISTINCT COALESCE(siparis_no,id::text)) FILTER (WHERE oneri_adedi > 0)::int oneri_siparisi,
         COUNT(DISTINCT COALESCE(siparis_no,id::text))::int siparis
       FROM siparis_kalemleri WHERE isletme_id=$1 AND olusturma >= NOW()-($2::text || ' days')::interval`, [tenantId, aralik]),
     // Bir önceki eşit uzunluktaki dönem: kutucuklardaki trend karşılaştırması için.
     pool.query(`SELECT COALESCE(SUM(fiyat*adet),0) ciro, COALESCE(SUM(adet),0)::int adet,
+        COALESCE(SUM(fiyat*LEAST(adet,oneri_adedi)),0) oneri_cirosu,
+        COALESCE(SUM(LEAST(adet,oneri_adedi)),0)::int oneri_adedi,
+        COUNT(DISTINCT COALESCE(siparis_no,id::text)) FILTER (WHERE oneri_adedi > 0)::int oneri_siparisi,
         COUNT(DISTINCT COALESCE(siparis_no,id::text))::int siparis
       FROM siparis_kalemleri
       WHERE isletme_id=$1 AND olusturma >= NOW()-($2::text || ' days')::interval
         AND olusturma < NOW()-($3::text || ' days')::interval`, [tenantId, String(aralik * 2), aralik]),
   ]);
   return {
-    gunluk: gunluk.rows.map((g) => ({ ...g, ciro: Number(g.ciro), adet: Number(g.adet), siparis: Number(g.siparis) })),
+    gunluk: gunluk.rows.map((g) => ({ ...g, ciro: Number(g.ciro), adet: Number(g.adet), siparis: Number(g.siparis), oneriCirosu: Number(g.oneri_cirosu), oneriAdedi: Number(g.oneri_adedi) })),
     urunler: urunler.rows.map((u) => ({ ...u, ciro: Number(u.ciro), adet: Number(u.adet) })),
     kategoriler: kategoriler.rows.map((k) => ({ ...k, ciro: Number(k.ciro), adet: Number(k.adet) })),
     saatlik: saatlik.rows.map((s) => ({ ...s, saat: Number(s.saat), adet: Number(s.adet), siparis: Number(s.siparis) })),
     haftalik: haftalik.rows.map((h) => ({ ...h, gun: Number(h.gun), adet: Number(h.adet), ciro: Number(h.ciro) })),
-    ozet: { ciro: Number(ozet.rows[0].ciro), adet: Number(ozet.rows[0].adet), siparis: Number(ozet.rows[0].siparis) },
+    ozet: {
+      ciro: Number(ozet.rows[0].ciro), adet: Number(ozet.rows[0].adet), siparis: Number(ozet.rows[0].siparis),
+      oneriCirosu: Number(ozet.rows[0].oneri_cirosu), oneriAdedi: Number(ozet.rows[0].oneri_adedi), oneriSiparisi: Number(ozet.rows[0].oneri_siparisi),
+    },
     oncekiOzet: {
       ciro: Number(oncekiOzet.rows[0].ciro), adet: Number(oncekiOzet.rows[0].adet), siparis: Number(oncekiOzet.rows[0].siparis),
+      oneriCirosu: Number(oncekiOzet.rows[0].oneri_cirosu), oneriAdedi: Number(oncekiOzet.rows[0].oneri_adedi), oneriSiparisi: Number(oncekiOzet.rows[0].oneri_siparisi),
     },
   };
 }

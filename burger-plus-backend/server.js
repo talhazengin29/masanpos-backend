@@ -65,6 +65,7 @@ import {
   duyurulariGetir,
   duyuruKaydet,
   kampanyalariGetir,
+  kampanyaTaslagiGetir,
   kampanyaKaydet,
   kategoriArsivle,
   personelArsivle,
@@ -707,7 +708,7 @@ app.post("/api/masa/:masaNo/zeka-oturumu/oner", masaZekasiLimiti, opsiyonelKulla
     res.json({ ...masaPlaniOlustur({ urunler, kampanyalar, masalar, tercihler, uye: Boolean(req.kullanici) }), oturum });
   } catch (e) { res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Ortak sipariş planı oluşturulamadı.") }); }
 });
-app.get("/api/oneriler", async (req, res) => {
+app.get("/api/oneriler", masaZekasiLimiti, async (req, res) => {
   const urunIdleri = String(req.query.urunler || "")
     .split(",").map(Number).filter((id) => Number.isInteger(id) && id > 0).slice(0, 30);
   res.json({ urunler: await onerileriGetir(req.isletme.id, urunIdleri) });
@@ -1633,6 +1634,7 @@ app.delete("/api/admin/duyurular/:id", admin, guvenli(async (req) => {
   io.to(oda(t, "genel")).emit("duyurular-guncellendi", await duyurulariGetir(t));
 }));
 app.get("/api/admin/kampanyalar", admin, guvenli(async (req) => ({ kampanyalar: await kampanyalariGetir(req.isletme.id, { tumu: true }) })));
+app.get("/api/admin/kampanyalar/taslak", admin, guvenli(async (req) => kampanyaTaslagiGetir(req.isletme.id, req.query.gun)));
 app.get("/api/admin/ceviri-durumu", admin, guvenli(async () => ceviriYapilandirmasi()));
 app.post("/api/admin/ceviriler/tamamla", admin, guvenli(async (req) => {
   const yapilandirma = ceviriYapilandirmasi();

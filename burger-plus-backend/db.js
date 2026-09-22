@@ -15,6 +15,7 @@ import {
   siparisUrunAdetleriniTopla,
   suresiDolanHammaddeRezervasyonlariniBirak,
 } from "./receteDb.js";
+import { oneriAdediniSinirla } from "./oneriMotoru.js";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -86,6 +87,7 @@ export async function tablolariHazirla(isletmeId) {
       kisi_adi TEXT,
       durum TEXT NOT NULL DEFAULT 'yeni',
       odendi BOOLEAN NOT NULL DEFAULT false,
+      oneri_adedi INTEGER NOT NULL DEFAULT 0,
       secimler JSONB NOT NULL DEFAULT '{}'::jsonb,
       olusturma TIMESTAMPTZ DEFAULT NOW()
     )
@@ -102,6 +104,7 @@ export async function tablolariHazirla(isletmeId) {
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazirlamaya_baslandi TIMESTAMPTZ");
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazir_at TIMESTAMPTZ");
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazirlayan_personel_id INTEGER");
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS oneri_adedi INTEGER NOT NULL DEFAULT 0");
   await pool.query("ALTER TABLE oturumlar ADD COLUMN IF NOT EXISTS kapandi_at TIMESTAMPTZ");
   await pool.query("ALTER TABLE oturumlar ADD COLUMN IF NOT EXISTS kapatan_personel_id INTEGER");
   await pool.query(`
@@ -487,11 +490,11 @@ export async function kalemEkle(isletmeId, masaNo, urun, kisiAdi, gelenSecimler 
   const adet = urun.adet || 1;
   await pool.query(
     `INSERT INTO siparis_kalemleri
-      (isletme_id,oturum_id,urun_id,urun_ad,fiyat,adet,kisi_adi,secimler,siparis_no,odeme_id,odeme_kalem_no)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)
+      (isletme_id,oturum_id,urun_id,urun_ad,fiyat,adet,kisi_adi,secimler,siparis_no,odeme_id,odeme_kalem_no,oneri_adedi)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12)
      ON CONFLICT (odeme_id, odeme_kalem_no)
        WHERE odeme_id IS NOT NULL AND odeme_kalem_no IS NOT NULL DO NOTHING`,
-    [tenantId, oturum.id, urun.id, urun.ad, urun.fiyat, adet, kisiAdi || "Misafir", JSON.stringify(secimler), siparisNo, odemeId, odemeKalemNo]
+    [tenantId, oturum.id, urun.id, urun.ad, urun.fiyat, adet, kisiAdi || "Misafir", JSON.stringify(secimler), siparisNo, odemeId, odemeKalemNo, oneriAdediniSinirla(urun.oneriAdedi, adet)]
   );
   return masaSiparisleriniGetir(tenantId, masaNo);
 }
@@ -539,6 +542,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
     if (!urun || !urun.aktif) throw new Error("Sepetteki ürün artık satışta değil.");
     const adet = Math.floor(Number(ham?.adet || 0));
     if (!Number.isInteger(adet) || adet < 1 || adet > 30) throw new Error("Ürün adedi geçersiz.");
+    const oneriAdedi = oneriAdediniSinirla(ham?.oneriAdedi, adet);
     if (urun.stok_takibi === true && Number(urun.stok_adedi) < adet) {
       throw new Error(`${urun.ad} için yeterli stok bulunmuyor.`);
     }
@@ -662,6 +666,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
       kategori: urun.kategori,
       gorsel: urun.gorsel || null,
       adet,
+      oneriAdedi,
       fiyat: indirimliFiyat + gramajFiyat + boyutFiyati + ekstraMalzemeFiyati,
       orijinalFiyat: kampanya ? temelFiyat + gramajFiyat + boyutFiyati + ekstraMalzemeFiyati : null,
       kampanya,
