@@ -158,6 +158,10 @@ import {
 } from "./receteDb.js";
 import { landingChatYaniti } from "./landingChat.js";
 import {
+  eskiOneriAtiflariniTemizle, oneriAtifTablolariniHazirla, oneriOlayiKaydet, oneriOturumuOlustur,
+  oneriReferansiOlustur, oneriReferansiniDogrula,
+} from "./oneriAtif.js";
+import {
   basvuruTablosunuHazirla, landingBasvurusuOlustur,
   superBasvurulariGetir, superBasvuruOzetiniGetir, superBasvuruGuncelle,
 } from "./basvuruDb.js";
@@ -316,6 +320,12 @@ const sikayetLimiti = rateLimit({
 const masaZekasiLimiti = rateLimit({
   windowMs: 10 * 60_000, limit: URETIM ? 90 : 300, standardHeaders: "draft-8", legacyHeaders: false,
   message: { hata: "Çok fazla öneri istendi. Lütfen kısa süre sonra tekrar deneyin." },
+});
+const oneriOlayLimiti = rateLimit({
+  // Restoran Wi-Fi'sinde çok sayıda müşteri aynı IP'yi paylaşır ve her öneri
+  // görüntülenme/tıklama/ekleme için ayrı olay üretir. Genel API limiti ayrıca geçerlidir.
+  windowMs: 10 * 60_000, limit: URETIM ? 900 : 2400, standardHeaders: "draft-8", legacyHeaders: false,
+  message: { hata: "Çok fazla öneri olayı gönderildi. Lütfen kısa süre sonra tekrar deneyin." },
 });
 const landingChatLimiti = rateLimit({
   windowMs: 5 * 60_000,
@@ -708,10 +718,41 @@ app.post("/api/masa/:masaNo/zeka-oturumu/oner", masaZekasiLimiti, opsiyonelKulla
     res.json({ ...masaPlaniOlustur({ urunler, kampanyalar, masalar, tercihler, uye: Boolean(req.kullanici) }), oturum });
   } catch (e) { res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Ortak sipariş planı oluşturulamadı.") }); }
 });
-app.get("/api/oneriler", masaZekasiLimiti, async (req, res) => {
-  const urunIdleri = String(req.query.urunler || "")
-    .split(",").map(Number).filter((id) => Number.isInteger(id) && id > 0).slice(0, 30);
-  res.json({ urunler: await onerileriGetir(req.isletme.id, urunIdleri) });
+app.get("/api/oneriler", masaZekasiLimiti, opsiyonelKullaniciMiddleware(), async (req, res) => {
+  try {
+    const urunIdleri = String(req.query.urunler || "")
+      .split(",").map(Number).filter((id) => Number.isInteger(id) && id > 0).slice(0, 30);
+    const urunler = await onerileriGetir(req.isletme.id, urunIdleri);
+    const oturum = await oneriOturumuOlustur(pool, {
+      isletmeId: req.isletme.id,
+      kullaniciId: req.kullanici?.id || null,
+      kaynakUrunIdleri: urunIdleri,
+      onerilenUrunIdleri: urunler.map((urun) => Number(urun.id)),
+    });
+    const oneriReferansi = oturum ? oneriReferansiOlustur({
+      oturumId: oturum.id, isletmeId: req.isletme.id, urunIdleri: oturum.urunIdleri,
+    }) : null;
+    res.json({ urunler, oneriReferansi, sonGecerlilik: oturum?.sonGecerlilik || null });
+  } catch (e) {
+    res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Öneriler hazırlanamadı."), ...(e.kod ? { kod: e.kod } : {}) });
+  }
+});
+app.post("/api/oneriler/olay", oneriOlayLimiti, async (req, res) => {
+  try {
+    const urunId = Number(req.body?.urunId);
+    const referans = oneriReferansiniDogrula(req.body?.referans, { isletmeId: req.isletme.id, urunId });
+    const sonuc = await oneriOlayiKaydet(pool, {
+      isletmeId: req.isletme.id,
+      oturumId: referans.sid,
+      urunId,
+      olayTuru: req.body?.olay,
+      adet: req.body?.adet || 1,
+      olayAnahtari: req.body?.olayAnahtari,
+    });
+    res.status(sonuc.kaydedildi ? 201 : 200).json(sonuc);
+  } catch (e) {
+    res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Öneri olayı kaydedilemedi."), ...(e.kod ? { kod: e.kod } : {}) });
+  }
 });
 app.get("/api/kategoriler", async (req, res) => {
   res.json({ kategoriler: await kategorileriGetir(req.isletme.id) });
@@ -2028,6 +2069,7 @@ isletmeTablosunuHazirla()
     return tablolariHazirla(varsayilanIsletmeId);
   })
   .then(() => idempotencyTablosunuHazirla(pool))
+  .then(() => oneriAtifTablolariniHazirla(pool))
   .then(() => adminTablolariHazirla(varsayilanIsletmeId))
   .then(() => sadakatTablolariHazirla(varsayilanIsletmeId, pool))
   .then(() => cuzdanTablolariHazirla(pool))
@@ -2046,6 +2088,11 @@ isletmeTablosunuHazirla()
     httpServer.listen(PORT, "0.0.0.0", () => {
       console.log(`Burger Plus backend calisiyor -> port ${PORT}`);
       mevcutCevirileriArkaPlandaTamamla().catch((hata) => console.error("AI ceviri taramasi baslatilamadi:", hata.message));
+      eskiOneriAtiflariniTemizle(pool).catch((hata) => console.error("Eski oneri atiflari temizlenemedi:", hata.message));
+      const oneriTemizlikZamanlayicisi = setInterval(() => {
+        eskiOneriAtiflariniTemizle(pool).catch((hata) => console.error("Eski oneri atiflari temizlenemedi:", hata.message));
+      }, 24 * 60 * 60_000);
+      oneriTemizlikZamanlayicisi.unref();
     });
   })
   .catch((err) => {

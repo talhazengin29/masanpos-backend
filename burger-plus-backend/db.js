@@ -15,7 +15,7 @@ import {
   siparisUrunAdetleriniTopla,
   suresiDolanHammaddeRezervasyonlariniBirak,
 } from "./receteDb.js";
-import { oneriAdediniSinirla } from "./oneriMotoru.js";
+import { oneriAtiflariniDogrula, oneriOlayiKaydet } from "./oneriAtif.js";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -494,8 +494,16 @@ export async function kalemEkle(isletmeId, masaNo, urun, kisiAdi, gelenSecimler 
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12)
      ON CONFLICT (odeme_id, odeme_kalem_no)
        WHERE odeme_id IS NOT NULL AND odeme_kalem_no IS NOT NULL DO NOTHING`,
-    [tenantId, oturum.id, urun.id, urun.ad, urun.fiyat, adet, kisiAdi || "Misafir", JSON.stringify(secimler), siparisNo, odemeId, odemeKalemNo, oneriAdediniSinirla(urun.oneriAdedi, adet)]
+    [tenantId, oturum.id, urun.id, urun.ad, urun.fiyat, adet, kisiAdi || "Misafir", JSON.stringify(secimler), siparisNo, odemeId, odemeKalemNo, Number(urun.oneriAdedi || 0)]
   );
+  if (odemeId && odemeKalemNo != null) {
+    for (const atif of urun.oneriAtiflari || []) {
+      await oneriOlayiKaydet(pool, {
+        isletmeId: tenantId, oturumId: atif.oturumId, urunId: urun.id,
+        olayTuru: "satin_alindi", adet: atif.adet, odemeId, odemeKalemNo,
+      });
+    }
+  }
   return masaSiparisleriniGetir(tenantId, masaNo);
 }
 
@@ -537,12 +545,24 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
     }
   }
 
-  return hamUrunler.map((ham) => {
+  const kullanilanAtiflar = new Map();
+  const atifBilgileri = [];
+  for (const ham of hamUrunler) {
+    atifBilgileri.push(await oneriAtiflariniDogrula(pool, {
+      isletmeId: tenantId,
+      urunId: Number(ham?.id),
+      adet: Math.floor(Number(ham?.adet || 0)),
+      referanslar: ham?.oneriReferanslari,
+      kullanilanAtiflar,
+    }));
+  }
+
+  return hamUrunler.map((ham, hamIndex) => {
     const urun = katalog.get(Number(ham?.id));
     if (!urun || !urun.aktif) throw new Error("Sepetteki ürün artık satışta değil.");
     const adet = Math.floor(Number(ham?.adet || 0));
     if (!Number.isInteger(adet) || adet < 1 || adet > 30) throw new Error("Ürün adedi geçersiz.");
-    const oneriAdedi = oneriAdediniSinirla(ham?.oneriAdedi, adet);
+    const { oneriAdedi, atiflar: oneriAtiflari } = atifBilgileri[hamIndex];
     if (urun.stok_takibi === true && Number(urun.stok_adedi) < adet) {
       throw new Error(`${urun.ad} için yeterli stok bulunmuyor.`);
     }
@@ -667,6 +687,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
       gorsel: urun.gorsel || null,
       adet,
       oneriAdedi,
+      oneriAtiflari,
       fiyat: indirimliFiyat + gramajFiyat + boyutFiyati + ekstraMalzemeFiyati,
       orijinalFiyat: kampanya ? temelFiyat + gramajFiyat + boyutFiyati + ekstraMalzemeFiyati : null,
       kampanya,

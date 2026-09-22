@@ -5,10 +5,12 @@ import { readFile } from "node:fs/promises";
 const dbKodu = await readFile(new URL("../db.js", import.meta.url), "utf8");
 const adminDbKodu = await readFile(new URL("../adminDb.js", import.meta.url), "utf8");
 
-test("oneri adedi odemeden siparis kalemine tasinir", () => {
-  assert.match(dbKodu, /oneriAdediniSinirla\(ham\?\.oneriAdedi, adet\)/);
+test("oneri adedi istemciden alinmaz, imzali referanslardan dogrulanir", () => {
+  assert.doesNotMatch(dbKodu, /ham\?\.oneriAdedi/);
+  assert.match(dbKodu, /oneriAtiflariniDogrula\(pool/);
+  assert.match(dbKodu, /referanslar: ham\?\.oneriReferanslari/);
   assert.match(dbKodu, /oneri_adedi\)/);
-  assert.match(dbKodu, /oneriAdediniSinirla\(urun\.oneriAdedi, adet\)/);
+  assert.match(dbKodu, /olayTuru: "satin_alindi"/);
 });
 
 test("oneri cirosu tenant ve tarih kapsamli satis raporuna eklenir", () => {

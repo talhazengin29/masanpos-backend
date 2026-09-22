@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { oneriAdediniSinirla, otomatikOnerileriSirala } from "../oneriMotoru.js";
+import { oneriPerformansPuani, otomatikOnerileriSirala } from "../oneriMotoru.js";
 
 const urunler = [
   { id: 1, ad: "Burger", urunTipi: "burger", aktif: true, stokta: true, sira: 1 },
@@ -60,9 +60,27 @@ test("satis gecmisi yoksa tamamlayici urun tipi devreye girer", () => {
   assert.ok(sonuc.every((urun) => urun.oneriNedeni === "populer"));
 });
 
-test("oneri atfi urun adedini asamaz ve gecersiz degerleri sifirlar", () => {
-  assert.equal(oneriAdediniSinirla(2, 3), 2);
-  assert.equal(oneriAdediniSinirla(8, 3), 3);
-  assert.equal(oneriAdediniSinirla(-2, 3), 0);
-  assert.equal(oneriAdediniSinirla("gecersiz", 3), 0);
+test("dusuk orneklem performans puanini etkilemez ve puan ust sinirlidir", () => {
+  assert.deepEqual(oneriPerformansPuani({ goruntulenme: 5, satinAlma: 5 }), {
+    puan: 0, guvenilir: false, donusumYuzde: null,
+  });
+  const guclu = oneriPerformansPuani({ goruntulenme: 100, tiklama: 100, sepeteEkleme: 100, satinAlma: 100 });
+  assert.equal(guclu.guvenilir, true);
+  assert.equal(guclu.donusumYuzde, 100);
+  assert.ok(guclu.puan <= 320);
+});
+
+test("yeterli gercek donusum benzer adaylar arasinda siralamayi iyilestirir", () => {
+  const sonuc = otomatikOnerileriSirala({
+    urunler,
+    sepetUrunIdleri: [1],
+    manuelOneriIdleri: [2, 3],
+    performanslar: [
+      { urun_id: 2, goruntulenme: 60, tiklama: 8, sepete_ekleme: 2, satin_alma: 0 },
+      { urun_id: 3, goruntulenme: 60, tiklama: 30, sepete_ekleme: 18, satin_alma: 12 },
+    ],
+  });
+
+  assert.equal(sonuc[0].id, 3);
+  assert.equal(sonuc[0].oneriDonusumu, 20);
 });
