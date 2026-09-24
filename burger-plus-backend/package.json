@@ -1,7 +1,7 @@
 {
-  "name": "burger-plus-backend",
+  "name": "masanpos-backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "MasanPOS siparis, adisyon ve restoran operasyon backend servisi",
   "main": "index.js",
   "scripts": {
     "start": "node server.js",

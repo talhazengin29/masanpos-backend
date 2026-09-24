@@ -2,7 +2,7 @@
 //
 // Kendi logosunu yüklememiş işletmelerde bu görsel kullanılır; logo yükleyen
 // işletmede hiçbir şey değişmez (bkz. temaCoz aşağıda). Dosyalar frontend'in
-// kök public klasöründe durur (burger-plus-web/apps/landing/public/gorseller),
+// kök public klasöründe durur (masanpos-web/apps/landing/public/gorseller),
 // yayında sitenin kökünden servis edilir: /gorseller/...
 //
 // Not: yerel geliştirmede müşteri uygulaması ayrı portta çalıştığı için bu yol

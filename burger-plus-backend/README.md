@@ -1,4 +1,4 @@
-# Burger Plus — Backend
+# MasanPOS — Backend
 
 Çok-telefon + mutfak destekli gerçek zamanlı sipariş sunucusu.
 Node.js + Express + Socket.io + **PostgreSQL**.
@@ -161,7 +161,7 @@ Bu backend hem yerel hem bulut ortamda çalışır:
 - **Yerel:** `.env` içinde `PGHOST/PGUSER/PGPASSWORD/PGDATABASE`
 - **Yayın:** Tek satır `DATABASE_URL` (Supabase'in verdiği adres)
 
-Detaylı adım adım rehber için `burger-plus-web` projesindeki
+Detaylı adım adım rehber için `masanpos-web` projesindeki
 **YAYINA-CIKIS-REHBERI.md** dosyasına bak.
 
 ### Yerel kurulum notu

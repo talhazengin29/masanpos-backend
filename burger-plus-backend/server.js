@@ -1,5 +1,5 @@
 // ============================================================================
-// Burger Plus — Backend sunucusu (PostgreSQL)
+// MasanPOS — Backend sunucusu (PostgreSQL)
 // Express (HTTP API) + Socket.io (anlik guncelleme) + PostgreSQL (kalici veri).
 //
 // Cok-telefon senaryosu: ayni masaya baglanan herkes o masanin "odasina"
@@ -1753,7 +1753,7 @@ app.delete("/api/admin/oduller/:id", admin, guvenli(async (req) => {
   io.to(oda(t, "genel")).emit("oduller-guncellendi");
 }));
 
-app.get("/", (req, res) => res.send("Burger Plus backend calisiyor (PostgreSQL)"));
+app.get("/", (req, res) => res.send("MasanPOS backend calisiyor (PostgreSQL)"));
 
 // Saglik kontrolu — Render/izleme araclari icin
 app.get("/saglik", (req, res) => res.json({ durum: "calisiyor", zaman: new Date().toISOString() }));
@@ -2086,7 +2086,7 @@ isletmeTablosunuHazirla()
   .then(() => ilkSuperAdminiHazirla())
   .then(() => {
     httpServer.listen(PORT, "0.0.0.0", () => {
-      console.log(`Burger Plus backend calisiyor -> port ${PORT}`);
+      console.log(`MasanPOS backend calisiyor -> port ${PORT}`);
       mevcutCevirileriArkaPlandaTamamla().catch((hata) => console.error("AI ceviri taramasi baslatilamadi:", hata.message));
       eskiOneriAtiflariniTemizle(pool).catch((hata) => console.error("Eski oneri atiflari temizlenemedi:", hata.message));
       const oneriTemizlikZamanlayicisi = setInterval(() => {

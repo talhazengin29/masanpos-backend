@@ -13,11 +13,11 @@ function istemciAl() {
 }
 
 export async function sifirlamaEpostasiGonder(email, ad, link) {
-  const gonderen = String(process.env.RESEND_GONDEREN || "Burger Plus <onboarding@resend.dev>").trim();
+  const gonderen = String(process.env.RESEND_GONDEREN || "MasanPOS <onboarding@resend.dev>").trim();
   const { error } = await istemciAl().emails.send({
     from: gonderen,
     to: email,
-    subject: "Burger Plus — Şifre sıfırlama",
+    subject: "MasanPOS — Şifre sıfırlama",
     html: sifirlamaHtml(ad, link),
   });
   if (error) throw new Error(error.message || "Sıfırlama e-postası gönderilemedi.");
@@ -34,7 +34,7 @@ function sifirlamaHtml(ad, link) {
           <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px;width:100%;background:#15110f;border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:32px 28px;">
             <tr>
               <td align="center" style="padding-bottom:20px;">
-                <span style="display:inline-block;color:#ff6b00;font-size:22px;font-weight:800;letter-spacing:.02em;">🍔 Burger Plus</span>
+                <span style="display:inline-block;color:#00c99a;font-size:22px;font-weight:800;letter-spacing:.02em;">MasanPOS</span>
               </td>
             </tr>
             <tr>

@@ -20,7 +20,7 @@ export function ikiFaktorSirriUret() {
 }
 
 export function ikiFaktorUriUret(secret, email) {
-  return generateURI({ issuer: "Burger Plus", label: String(email || "hesap"), secret });
+  return generateURI({ issuer: "MasanPOS", label: String(email || "hesap"), secret });
 }
 
 export async function ikiFaktorKoduGecerliMi(secret, token) {
