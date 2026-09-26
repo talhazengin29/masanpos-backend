@@ -52,6 +52,8 @@ import {
   yerelAdminKurulumGerekli,
   urunleriGetir,
   onerileriGetir,
+  oneriIndirimAyariniGetir,
+  oneriIndirimAyariniKaydet,
   urunKaydet,
   urunAktiflikDegistir,
   urunArsivle,
@@ -722,7 +724,7 @@ app.get("/api/oneriler", masaZekasiLimiti, opsiyonelKullaniciMiddleware(), async
   try {
     const urunIdleri = String(req.query.urunler || "")
       .split(",").map(Number).filter((id) => Number.isInteger(id) && id > 0).slice(0, 30);
-    const urunler = await onerileriGetir(req.isletme.id, urunIdleri);
+    const { urunler, indirimAyari } = await onerileriGetir(req.isletme.id, urunIdleri);
     const oturum = await oneriOturumuOlustur(pool, {
       isletmeId: req.isletme.id,
       kullaniciId: req.kullanici?.id || null,
@@ -731,6 +733,7 @@ app.get("/api/oneriler", masaZekasiLimiti, opsiyonelKullaniciMiddleware(), async
     });
     const oneriReferansi = oturum ? oneriReferansiOlustur({
       oturumId: oturum.id, isletmeId: req.isletme.id, urunIdleri: oturum.urunIdleri,
+      indirimYuzde: indirimAyari.aktif ? indirimAyari.indirimYuzde : 0,
     }) : null;
     res.json({ urunler, oneriReferansi, sonGecerlilik: oturum?.sonGecerlilik || null });
   } catch (e) {
@@ -1676,6 +1679,16 @@ app.delete("/api/admin/duyurular/:id", admin, guvenli(async (req) => {
 }));
 app.get("/api/admin/kampanyalar", admin, guvenli(async (req) => ({ kampanyalar: await kampanyalariGetir(req.isletme.id, { tumu: true }) })));
 app.get("/api/admin/kampanyalar/taslak", admin, guvenli(async (req) => kampanyaTaslagiGetir(req.isletme.id, req.query.gun)));
+app.get("/api/admin/oneri-indirim-ayari", admin, guvenli(async (req) => ({ ayar: await oneriIndirimAyariniGetir(req.isletme.id) })));
+app.put("/api/admin/oneri-indirim-ayari", admin, guvenli(async (req) => {
+  const ayar = await oneriIndirimAyariniKaydet(req.isletme.id, req.body);
+  await revizyonKaydet(req.isletme.id, {
+    yapan: req.kullanici, varlikTuru: "oneri_indirimi", islem: "guncelleme",
+    aciklama: ayar.aktif ? `Sepete özel öneri indirimi %${ayar.indirimYuzde} olarak açıldı.` : "Sepete özel öneri indirimi kapatıldı.",
+    yeniDeger: ayar,
+  });
+  return { ayar };
+}));
 app.get("/api/admin/ceviri-durumu", admin, guvenli(async () => ceviriYapilandirmasi()));
 app.post("/api/admin/ceviriler/tamamla", admin, guvenli(async (req) => {
   const yapilandirma = ceviriYapilandirmasi();

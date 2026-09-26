@@ -16,6 +16,7 @@ import {
   suresiDolanHammaddeRezervasyonlariniBirak,
 } from "./receteDb.js";
 import { oneriAtiflariniDogrula, oneriOlayiKaydet } from "./oneriAtif.js";
+import { dogrulanmisOneriIndirimYuzdesi, enAvantajliTemelFiyatiSec } from "./oneriIndirimi.js";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -562,7 +563,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
     if (!urun || !urun.aktif) throw new Error("Sepetteki ürün artık satışta değil.");
     const adet = Math.floor(Number(ham?.adet || 0));
     if (!Number.isInteger(adet) || adet < 1 || adet > 30) throw new Error("Ürün adedi geçersiz.");
-    const { oneriAdedi, atiflar: oneriAtiflari } = atifBilgileri[hamIndex];
+    const { oneriAdedi, atiflar: oneriAtiflari, oneriIndirimYuzde } = atifBilgileri[hamIndex];
     if (urun.stok_takibi === true && Number(urun.stok_adedi) < adet) {
       throw new Error(`${urun.ad} için yeterli stok bulunmuyor.`);
     }
@@ -679,7 +680,13 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
     };
     const kampanya = kampanyaIndirimleri.get(urun.kategori) || null;
     const temelFiyat = Number(urun.fiyat);
-    const indirimliFiyat = kampanya ? Math.round(temelFiyat * (1 - kampanya.indirimYuzde / 100) * 100) / 100 : temelFiyat;
+    const fiyatSecimi = enAvantajliTemelFiyatiSec({
+      temelFiyat,
+      kampanyaYuzde: kampanya?.indirimYuzde || 0,
+      oneriIndirimYuzde: dogrulanmisOneriIndirimYuzdesi({ indirimYuzde: oneriIndirimYuzde, oneriAdedi, toplamAdet: adet }),
+    });
+    const uygulananKampanya = fiyatSecimi.kaynak === "kampanya" ? kampanya : null;
+    const oneriIndirimi = fiyatSecimi.kaynak === "oneri" ? { indirimYuzde: fiyatSecimi.indirimYuzde } : null;
     return {
       id: Number(urun.id),
       ad: urun.ad,
@@ -688,9 +695,10 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
       adet,
       oneriAdedi,
       oneriAtiflari,
-      fiyat: indirimliFiyat + gramajFiyat + boyutFiyati + ekstraMalzemeFiyati,
-      orijinalFiyat: kampanya ? temelFiyat + gramajFiyat + boyutFiyati + ekstraMalzemeFiyati : null,
-      kampanya,
+      fiyat: fiyatSecimi.fiyat + gramajFiyat + boyutFiyati + ekstraMalzemeFiyati,
+      orijinalFiyat: fiyatSecimi.kaynak ? temelFiyat + gramajFiyat + boyutFiyati + ekstraMalzemeFiyati : null,
+      kampanya: uygulananKampanya,
+      oneriIndirimi,
       temelMiktar: standartGramaj || null,
       malzemeler: tumMalzemeler,
       gramajOpsiyonu: kural,

@@ -22,7 +22,7 @@ function imzala(govde) {
   return createHmac("sha256", sir()).update(govde).digest("base64url");
 }
 
-export function oneriReferansiOlustur({ oturumId, isletmeId, urunIdleri, simdi = Date.now(), omurSaniye = VARSAYILAN_OMUR_SANIYE }) {
+export function oneriReferansiOlustur({ oturumId, isletmeId, urunIdleri, indirimYuzde = 0, simdi = Date.now(), omurSaniye = VARSAYILAN_OMUR_SANIYE }) {
   const urunler = [...new Set((urunIdleri || []).map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
   if (!oturumId || !Number.isSafeInteger(Number(isletmeId)) || !urunler.length) throw hata("Öneri referansı oluşturulamadı.", 500);
   const payload = {
@@ -31,6 +31,7 @@ export function oneriReferansiOlustur({ oturumId, isletmeId, urunIdleri, simdi =
     sid: String(oturumId),
     tid: Number(isletmeId),
     pids: urunler,
+    disc: Math.max(0, Math.min(50, Number(indirimYuzde) || 0)),
     iat: Math.floor(simdi / 1000),
     exp: Math.floor(simdi / 1000) + Math.max(60, Math.floor(Number(omurSaniye) || VARSAYILAN_OMUR_SANIYE)),
   };
@@ -129,8 +130,10 @@ export async function oneriAtiflariniDogrula(db, { isletmeId, urunId, adet, refe
   if ((referanslar || []).length > 5) throw hata("Çok fazla öneri referansı gönderildi.");
   if ((referanslar || []).some((deger) => typeof deger !== "string" || !deger || deger.length > 2048)) throw hata("Öneri referansı geçersiz.");
   const tekil = [...new Set(referanslar || [])];
-  const oturumlar = tekil.map((referans) => oneriReferansiniDogrula(referans, { isletmeId, urunId }).sid);
-  if (!oturumlar.length) return { oneriAdedi: 0, atiflar: [] };
+  const payloadlar = tekil.map((referans) => oneriReferansiniDogrula(referans, { isletmeId, urunId }));
+  const oturumlar = payloadlar.map((payload) => payload.sid);
+  if (!oturumlar.length) return { oneriAdedi: 0, atiflar: [], oneriIndirimYuzde: 0 };
+  const indirimler = new Map(payloadlar.map((payload) => [payload.sid, Math.max(0, Math.min(50, Number(payload.disc) || 0))]));
   const sonuc = await db.query(`SELECT o.id,
       COALESCE(SUM(e.adet) FILTER (WHERE e.olay_turu='sepete_eklendi'),0)::int AS eklenen
     FROM oneri_oturumlari o
@@ -148,5 +151,9 @@ export async function oneriAtiflariniDogrula(db, { isletmeId, urunId, adet, refe
     kullanilanAtiflar.set(anahtar, kullanilan + miktar);
     kalan -= miktar;
   }
-  return { oneriAdedi: atiflar.reduce((toplam, atif) => toplam + atif.adet, 0), atiflar };
+  return {
+    oneriAdedi: atiflar.reduce((toplam, atif) => toplam + atif.adet, 0),
+    atiflar,
+    oneriIndirimYuzde: atiflar.reduce((oran, atif) => Math.max(oran, indirimler.get(atif.oturumId) || 0), 0),
+  };
 }

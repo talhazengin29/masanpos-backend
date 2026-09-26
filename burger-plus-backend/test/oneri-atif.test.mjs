@@ -14,8 +14,10 @@ process.env.ONERI_REFERANS_SECRET ||= "test-only-recommendation-secret-32-chars"
 
 test("imzali oneri referansi tenant, urun ve sureye baglidir", () => {
   const simdi = Date.now();
-  const referans = oneriReferansiOlustur({ oturumId: randomUUID(), isletmeId: 7, urunIdleri: [11, 12], simdi, omurSaniye: 60 });
-  assert.equal(oneriReferansiniDogrula(referans, { isletmeId: 7, urunId: 11, simdi }).tid, 7);
+  const referans = oneriReferansiOlustur({ oturumId: randomUUID(), isletmeId: 7, urunIdleri: [11, 12], indirimYuzde: 10, simdi, omurSaniye: 60 });
+  const payload = oneriReferansiniDogrula(referans, { isletmeId: 7, urunId: 11, simdi });
+  assert.equal(payload.tid, 7);
+  assert.equal(payload.disc, 10);
   assert.throws(() => oneriReferansiniDogrula(`${referans.slice(0, -1)}x`, { isletmeId: 7, urunId: 11 }), /doğrulanamadı/);
   assert.throws(() => oneriReferansiniDogrula(referans, { isletmeId: 8, urunId: 11, simdi }), (e) => e.kod === "ONERI_REFERANSI_ISLETME_UYUSMAZLIGI");
   assert.throws(() => oneriReferansiniDogrula(referans, { isletmeId: 7, urunId: 99, simdi }), (e) => e.kod === "ONERI_REFERANSI_URUN_UYUSMAZLIGI");
@@ -34,12 +36,13 @@ test("gercek PostgreSQL ile oneri olaylari ve satin alma atfi", { skip: !process
     await db.query("INSERT INTO isletmeler(id) VALUES (1),(2)");
     await oneriAtifTablolariniHazirla(db);
     const oturum = await oneriOturumuOlustur(db, { isletmeId: 1, kaynakUrunIdleri: [5], onerilenUrunIdleri: [9] });
-    const referans = oneriReferansiOlustur({ oturumId: oturum.id, isletmeId: 1, urunIdleri: [9] });
+    const referans = oneriReferansiOlustur({ oturumId: oturum.id, isletmeId: 1, urunIdleri: [9], indirimYuzde: 10 });
     await oneriOlayiKaydet(db, { isletmeId: 1, oturumId: oturum.id, urunId: 9, olayTuru: "goruntulendi", olayAnahtari: randomUUID() });
     await oneriOlayiKaydet(db, { isletmeId: 1, oturumId: oturum.id, urunId: 9, olayTuru: "tiklandi", olayAnahtari: randomUUID() });
     await oneriOlayiKaydet(db, { isletmeId: 1, oturumId: oturum.id, urunId: 9, olayTuru: "sepete_eklendi", adet: 3, olayAnahtari: randomUUID() });
     const atif = await oneriAtiflariniDogrula(db, { isletmeId: 1, urunId: 9, adet: 2, referanslar: [referans] });
     assert.equal(atif.oneriAdedi, 2);
+    assert.equal(atif.oneriIndirimYuzde, 10);
     assert.equal(atif.atiflar[0].oturumId, oturum.id);
     await oneriOlayiKaydet(db, {
       isletmeId: 1, oturumId: oturum.id, urunId: 9, olayTuru: "satin_alindi", adet: 2,

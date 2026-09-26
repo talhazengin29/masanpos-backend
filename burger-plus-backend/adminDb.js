@@ -4,6 +4,12 @@ import { ingilizceCeviriUret } from "./ceviri.js";
 import { urunMalzemeleriniRecetedenGuncelle } from "./receteDb.js";
 import { otomatikOnerileriSirala } from "./oneriMotoru.js";
 import { kampanyaTaslagiOlustur } from "./kampanyaTaslagi.js";
+import {
+  ONERI_INDIRIM_AYARI_ANAHTARI,
+  indirimliFiyatHesapla,
+  oneriIndirimAyariniDogrula,
+  oneriIndirimAyariniDonustur,
+} from "./oneriIndirimi.js";
 
 function isletmeIdZorunlu(isletmeId) {
   const id = Number(isletmeId);
@@ -15,6 +21,28 @@ const sayi = (deger, varsayilan = 0) => {
   const n = Number(deger);
   return Number.isFinite(n) ? n : varsayilan;
 };
+
+export async function oneriIndirimAyariniGetir(isletmeId) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const sonuc = await pool.query(
+    "SELECT deger FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar=$2",
+    [tenantId, ONERI_INDIRIM_AYARI_ANAHTARI]
+  );
+  return oneriIndirimAyariniDonustur(sonuc.rows[0]?.deger);
+}
+
+export async function oneriIndirimAyariniKaydet(isletmeId, veri) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const ayar = oneriIndirimAyariniDogrula(veri);
+  await pool.query(
+    `INSERT INTO sistem_ayarlari (isletme_id,anahtar,deger,guncelleme)
+     VALUES ($1,$2,$3::jsonb,NOW())
+     ON CONFLICT (isletme_id,anahtar)
+     DO UPDATE SET deger=EXCLUDED.deger,guncelleme=NOW()`,
+    [tenantId, ONERI_INDIRIM_AYARI_ANAHTARI, JSON.stringify(ayar)]
+  );
+  return ayar;
+}
 
 function gramajOpsiyonunuDogrula(ham, temelMiktar) {
   if (ham == null) return null;
@@ -677,8 +705,8 @@ async function onerilenUrunleriDogrula(isletmeId, ham, kendiId) {
 export async function onerileriGetir(isletmeId, sepetUrunIdleri) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sepetIdleri = [...new Set((Array.isArray(sepetUrunIdleri) ? sepetUrunIdleri : []).map(Number).filter((id) => Number.isInteger(id) && id > 0))].slice(0, 30);
-  if (!sepetIdleri.length) return [];
-  const [manuelSonucu, istatistikSonucu, performansSonucu, katalog] = await Promise.all([
+  if (!sepetIdleri.length) return { urunler: [], indirimAyari: await oneriIndirimAyariniGetir(tenantId) };
+  const [manuelSonucu, istatistikSonucu, performansSonucu, katalog, indirimAyari] = await Promise.all([
     pool.query(
       "SELECT id,onerilen_urunler FROM urunler WHERE isletme_id=$1 AND id=ANY($2::int[]) AND aktif=true AND arsivli=false",
       [tenantId, sepetIdleri],
@@ -713,12 +741,13 @@ export async function onerileriGetir(isletmeId, sepetUrunIdleri) {
         AND o.kaynak_urun_idleri && $2::int[]
       GROUP BY e.urun_id`, [tenantId, sepetIdleri]),
     urunleriGetir(tenantId),
+    oneriIndirimAyariniGetir(tenantId),
   ]);
   const manuelOneriIdleri = manuelSonucu.rows
     .flatMap((urun) => Array.isArray(urun.onerilen_urunler) ? urun.onerilen_urunler : [])
     .map(Number)
     .filter(Number.isInteger);
-  return otomatikOnerileriSirala({
+  const urunler = otomatikOnerileriSirala({
     urunler: katalog,
     sepetUrunIdleri: sepetIdleri,
     istatistikler: istatistikSonucu.rows,
@@ -726,6 +755,16 @@ export async function onerileriGetir(isletmeId, sepetUrunIdleri) {
     manuelOneriIdleri,
     limit: 3,
   });
+  if (!indirimAyari.aktif) return { urunler, indirimAyari };
+  return {
+    indirimAyari,
+    urunler: urunler.map((urun) => ({
+      ...urun,
+      normalFiyat: Number(urun.fiyat),
+      fiyat: indirimliFiyatHesapla(urun.fiyat, indirimAyari.indirimYuzde),
+      oneriIndirimYuzde: indirimAyari.indirimYuzde,
+    })),
+  };
 }
 
 export async function urunAktiflikDegistir(isletmeId, id, aktif) {
