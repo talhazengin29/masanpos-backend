@@ -4,6 +4,7 @@ import {
   dogrulanmisOneriIndirimYuzdesi,
   enAvantajliTemelFiyatiSec,
   indirimliFiyatHesapla,
+  oneriIndirimAyariniDbdenGetir,
   oneriIndirimAyariniDogrula,
   oneriIndirimAyariniDonustur,
 } from "../oneriIndirimi.js";
@@ -35,7 +36,20 @@ test("kampanya ve öneri indirimi birleşmez, müşteri için avantajlı olan se
 });
 
 test("öneri indirimi yalnızca satırdaki bütün adetler doğrulanmışsa uygulanır", () => {
-  assert.equal(dogrulanmisOneriIndirimYuzdesi({ indirimYuzde: 10, oneriAdedi: 2, toplamAdet: 2 }), 10);
-  assert.equal(dogrulanmisOneriIndirimYuzdesi({ indirimYuzde: 10, oneriAdedi: 1, toplamAdet: 2 }), 0);
-  assert.equal(dogrulanmisOneriIndirimYuzdesi({ indirimYuzde: 10, oneriAdedi: 0, toplamAdet: 1 }), 0);
+  assert.equal(dogrulanmisOneriIndirimYuzdesi({ guncelAyar: { aktif: true, indirimYuzde: 10 }, oneriAdedi: 2, toplamAdet: 2 }), 10);
+  assert.equal(dogrulanmisOneriIndirimYuzdesi({ guncelAyar: { aktif: true, indirimYuzde: 10 }, oneriAdedi: 1, toplamAdet: 2 }), 0);
+  assert.equal(dogrulanmisOneriIndirimYuzdesi({ guncelAyar: { aktif: true, indirimYuzde: 10 }, oneriAdedi: 0, toplamAdet: 1 }), 0);
+});
+
+test("yönetici ayarı kapattığında veya oranı değiştirdiğinde güncel ayar anında geçerli olur", () => {
+  assert.equal(dogrulanmisOneriIndirimYuzdesi({ guncelAyar: { aktif: false, indirimYuzde: 10 }, oneriAdedi: 1, toplamAdet: 1 }), 0);
+  assert.equal(dogrulanmisOneriIndirimYuzdesi({ guncelAyar: { aktif: true, indirimYuzde: 25 }, oneriAdedi: 1, toplamAdet: 1 }), 25);
+});
+
+test("ödeme ayarı önbellekten değil her kontrolde veritabanından okunur", async () => {
+  let kayit = { aktif: true, indirimYuzde: 10 };
+  const db = { query: async () => ({ rows: [{ deger: kayit }] }) };
+  assert.deepEqual(await oneriIndirimAyariniDbdenGetir(db, 7), { aktif: true, indirimYuzde: 10 });
+  kayit = { aktif: false, indirimYuzde: 25 };
+  assert.deepEqual(await oneriIndirimAyariniDbdenGetir(db, 7), { aktif: false, indirimYuzde: 25 });
 });

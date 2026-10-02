@@ -16,7 +16,7 @@ import {
   suresiDolanHammaddeRezervasyonlariniBirak,
 } from "./receteDb.js";
 import { oneriAtiflariniDogrula, oneriOlayiKaydet } from "./oneriAtif.js";
-import { dogrulanmisOneriIndirimYuzdesi, enAvantajliTemelFiyatiSec } from "./oneriIndirimi.js";
+import { dogrulanmisOneriIndirimYuzdesi, enAvantajliTemelFiyatiSec, oneriIndirimAyariniDbdenGetir } from "./oneriIndirimi.js";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -537,6 +537,10 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
     )
     : { rows: [] };
   const bagliUrunler = new Map(bagliSonuc.rows.map((urun) => [Number(urun.id), urun]));
+  // İmzalı öneri referansı yalnızca ürünün gerçekten önerildiğini kanıtlar.
+  // Fiyat oranı ödeme anında güncel işletme ayarından okunur; böylece yönetici
+  // indirimi kapattığı veya değiştirdiği anda eski referanslar eski oranı taşımaz.
+  const guncelOneriIndirimAyari = await oneriIndirimAyariniDbdenGetir(pool, tenantId);
   const kampanyaIndirimleri = new Map();
   if (kullaniciId) {
     const kampanyalar = await pool.query(`SELECT id,baslik,indirim_yuzde,gecerli_kategoriler FROM kampanyalar WHERE isletme_id=$1 AND aktif=true AND indirim_yuzde > 0 AND (kampanya_tipi='surekli' OR (kampanya_tipi='saatli' AND EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Europe/Istanbul') >= baslangic_saat AND EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Europe/Istanbul') < bitis_saat))`, [tenantId]);
@@ -563,7 +567,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
     if (!urun || !urun.aktif) throw new Error("Sepetteki ürün artık satışta değil.");
     const adet = Math.floor(Number(ham?.adet || 0));
     if (!Number.isInteger(adet) || adet < 1 || adet > 30) throw new Error("Ürün adedi geçersiz.");
-    const { oneriAdedi, atiflar: oneriAtiflari, oneriIndirimYuzde } = atifBilgileri[hamIndex];
+    const { oneriAdedi, atiflar: oneriAtiflari } = atifBilgileri[hamIndex];
     if (urun.stok_takibi === true && Number(urun.stok_adedi) < adet) {
       throw new Error(`${urun.ad} için yeterli stok bulunmuyor.`);
     }
@@ -683,7 +687,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
     const fiyatSecimi = enAvantajliTemelFiyatiSec({
       temelFiyat,
       kampanyaYuzde: kampanya?.indirimYuzde || 0,
-      oneriIndirimYuzde: dogrulanmisOneriIndirimYuzdesi({ indirimYuzde: oneriIndirimYuzde, oneriAdedi, toplamAdet: adet }),
+      oneriIndirimYuzde: dogrulanmisOneriIndirimYuzdesi({ guncelAyar: guncelOneriIndirimAyari, oneriAdedi, toplamAdet: adet }),
     });
     const uygulananKampanya = fiyatSecimi.kaynak === "kampanya" ? kampanya : null;
     const oneriIndirimi = fiyatSecimi.kaynak === "oneri" ? { indirimYuzde: fiyatSecimi.indirimYuzde } : null;

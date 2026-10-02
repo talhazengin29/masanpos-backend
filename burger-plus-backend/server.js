@@ -55,6 +55,7 @@ import {
   oneriIndirimAyariniGetir,
   oneriIndirimAyariniKaydet,
   urunKaydet,
+  menuTaslaginiKaydet,
   urunAktiflikDegistir,
   urunArsivle,
   kategorileriGetir,
@@ -85,6 +86,7 @@ import {
   eksikCevirileriTamamla,
 } from "./adminDb.js";
 import { ceviriYapilandirmasi } from "./ceviri.js";
+import { menuGorseliniAnalizEt } from "./menuAktarimi.js";
 import { operasyonNabziniGetir } from "./operasyonDb.js";
 import {
   gorselYukle, logoYukle, temaArkaPlaniYukle, storageDosyasiniSil,
@@ -349,6 +351,13 @@ const dosyaYuklemeLimiti = rateLimit({
   standardHeaders: "draft-8",
   legacyHeaders: false,
   message: { hata: "Dosya yükleme sınırına ulaşıldı. Lütfen daha sonra tekrar deneyin." },
+});
+const menuAktarimLimiti = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: URETIM ? 8 : 60,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { hata: "Menü analiz sınırına ulaşıldı. Lütfen 15 dakika sonra tekrar deneyin." },
 });
 
 const httpServer = createServer(app);
@@ -735,7 +744,7 @@ app.get("/api/oneriler", masaZekasiLimiti, opsiyonelKullaniciMiddleware(), async
       oturumId: oturum.id, isletmeId: req.isletme.id, urunIdleri: oturum.urunIdleri,
       indirimYuzde: indirimAyari.aktif ? indirimAyari.indirimYuzde : 0,
     }) : null;
-    res.json({ urunler, oneriReferansi, sonGecerlilik: oturum?.sonGecerlilik || null });
+    res.json({ urunler, oneriReferansi, indirimAyari, sonGecerlilik: oturum?.sonGecerlilik || null });
   } catch (e) {
     res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Öneriler hazırlanamadı."), ...(e.kod ? { kod: e.kod } : {}) });
   }
@@ -1480,6 +1489,28 @@ app.delete("/api/admin/tema-arka-plani", admin, guvenli(async (req) => {
   return yanit;
 }));
 app.get("/api/admin/urunler", admin, guvenli(async (req) => ({ urunler: await urunleriGetir(req.isletme.id, { tumu: true, stokDetayi: true }) })));
+app.post(
+  "/api/admin/menu-aktarim/analiz",
+  menuAktarimLimiti,
+  admin,
+  express.raw({ type: ["image/png", "image/jpeg", "image/webp", "application/pdf"], limit: "8mb" }),
+  guvenli(async (req) => ({ taslak: await menuGorseliniAnalizEt(req.body) }))
+);
+app.post("/api/admin/menu-aktarim/onayla", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const sonuc = await menuTaslaginiKaydet(t, req.body?.urunler);
+  await revizyonKaydet(t, {
+    yapan: req.kullanici,
+    varlikTuru: "menu_aktarimi",
+    varlikId: new Date().toISOString(),
+    islem: "toplu_ekleme",
+    aciklama: `${sonuc.eklenenler.length} ürün menü görselinden pasif taslak olarak eklendi.`,
+    yeniDeger: { eklenenUrunIdleri: sonuc.eklenenler.map((urun) => urun.id), atlananSayisi: sonuc.atlananlar.length },
+  });
+  io.to(oda(t, "genel")).emit("urunler-guncellendi", await urunleriGetir(t));
+  operasyonNabziDegisikliginiYayinla(t, "urun", { topluAktarim: true, adet: sonuc.eklenenler.length });
+  return { sonuc };
+}));
 app.get("/api/admin/recete-stok", admin, guvenli(async (req) => receteStokMerkeziniGetir(req.isletme.id, pool)));
 app.post("/api/admin/hammaddeler", admin, guvenli(async (req) => {
   const hammadde = await hammaddeKaydet(req.isletme.id, pool, req.body || {});
@@ -1687,6 +1718,7 @@ app.put("/api/admin/oneri-indirim-ayari", admin, guvenli(async (req) => {
     aciklama: ayar.aktif ? `Sepete özel öneri indirimi %${ayar.indirimYuzde} olarak açıldı.` : "Sepete özel öneri indirimi kapatıldı.",
     yeniDeger: ayar,
   });
+  io.to(oda(req.isletme.id, "genel")).emit("oneri-indirim-ayari-guncellendi", ayar);
   return { ayar };
 }));
 app.get("/api/admin/ceviri-durumu", admin, guvenli(async () => ceviriYapilandirmasi()));
@@ -1885,6 +1917,9 @@ io.use(async (socket, sonraki) => {
 io.on("connection", (socket) => {
   console.log("Baglandi:", socket.id);
   socket.join(oda(socket.data.isletmeId, "genel"));
+  oneriIndirimAyariniGetir(socket.data.isletmeId)
+    .then((ayar) => socket.emit("oneri-indirim-ayari-guncellendi", ayar))
+    .catch((hata) => console.error("Öneri indirim ayarı sokete gönderilemedi:", hata.message));
   if (socket.kullanici?.id) {
     socket.join(oda(socket.data.isletmeId, `kullanici-${socket.kullanici.id}`));
   }

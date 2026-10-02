@@ -27,6 +27,14 @@ export function oneriIndirimAyariniDogrula(deger = {}) {
   return { aktif: deger?.aktif === true, indirimYuzde: Math.round(oran * 10) / 10 };
 }
 
+export async function oneriIndirimAyariniDbdenGetir(db, isletmeId) {
+  const sonuc = await db.query(
+    "SELECT deger FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar=$2",
+    [Number(isletmeId), ONERI_INDIRIM_AYARI_ANAHTARI]
+  );
+  return oneriIndirimAyariniDonustur(sonuc.rows[0]?.deger);
+}
+
 export function indirimliFiyatHesapla(fiyat, indirimYuzde) {
   const temelFiyat = Number(fiyat);
   const oran = Number(indirimYuzde);
@@ -35,11 +43,11 @@ export function indirimliFiyatHesapla(fiyat, indirimYuzde) {
   return paraYuvarla(temelFiyat * (1 - Math.min(90, oran) / 100));
 }
 
-export function dogrulanmisOneriIndirimYuzdesi({ indirimYuzde, oneriAdedi, toplamAdet }) {
-  const oran = Number(indirimYuzde);
+export function dogrulanmisOneriIndirimYuzdesi({ guncelAyar, oneriAdedi, toplamAdet }) {
+  const oran = Number(guncelAyar?.indirimYuzde);
   const oneriMiktari = Math.floor(Number(oneriAdedi));
   const toplamMiktar = Math.floor(Number(toplamAdet));
-  if (!Number.isFinite(oran) || oran <= 0 || toplamMiktar < 1 || oneriMiktari !== toplamMiktar) return 0;
+  if (guncelAyar?.aktif !== true || !Number.isFinite(oran) || oran <= 0 || toplamMiktar < 1 || oneriMiktari !== toplamMiktar) return 0;
   return Math.min(50, oran);
 }
 

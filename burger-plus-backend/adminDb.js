@@ -7,8 +7,8 @@ import { kampanyaTaslagiOlustur } from "./kampanyaTaslagi.js";
 import {
   ONERI_INDIRIM_AYARI_ANAHTARI,
   indirimliFiyatHesapla,
+  oneriIndirimAyariniDbdenGetir,
   oneriIndirimAyariniDogrula,
-  oneriIndirimAyariniDonustur,
 } from "./oneriIndirimi.js";
 
 function isletmeIdZorunlu(isletmeId) {
@@ -24,11 +24,7 @@ const sayi = (deger, varsayilan = 0) => {
 
 export async function oneriIndirimAyariniGetir(isletmeId) {
   const tenantId = isletmeIdZorunlu(isletmeId);
-  const sonuc = await pool.query(
-    "SELECT deger FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar=$2",
-    [tenantId, ONERI_INDIRIM_AYARI_ANAHTARI]
-  );
-  return oneriIndirimAyariniDonustur(sonuc.rows[0]?.deger);
+  return oneriIndirimAyariniDbdenGetir(pool, tenantId);
 }
 
 export async function oneriIndirimAyariniKaydet(isletmeId, veri) {
@@ -636,6 +632,7 @@ export async function urunKaydet(isletmeId, veri) {
     sira,
   ];
   if (!alanlar[0] || alanlar[1] < 0) throw new Error("Ürün adı ve geçerli fiyat zorunludur.");
+  if (alanlar[14] && !alanlar[3]) throw new Error("Ürünü yayınlamadan önce ürün görselini ekleyin.");
   const oncekiCeviri = await oncekiCeviriGetir("urunler", tenantId, veri.id);
   const ceviriler = await ingilizceCeviriUret("urun", urunCeviriKaynagi({
     ad: alanlar[0],
@@ -682,7 +679,77 @@ export async function urunKaydet(isletmeId, veri) {
     const guncel = await pool.query("SELECT * FROM urunler WHERE isletme_id=$1 AND id=$2 AND arsivli=false", [tenantId, kaydedilenUrun.id]);
     kaydedilenUrun = guncel.rows[0] || kaydedilenUrun;
   }
+  if (kaydedilenUrun.aktif) {
+    await pool.query("UPDATE kategoriler SET aktif=true,gorsel=COALESCE(gorsel,$3),guncelleme=NOW() WHERE isletme_id=$1 AND ad=$2 AND arsivli=false", [tenantId, kaydedilenUrun.kategori, kaydedilenUrun.gorsel]);
+  }
   return urunDonustur(kaydedilenUrun, { stokDetayi: true });
+}
+
+export async function menuTaslaginiKaydet(isletmeId, hamUrunler) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  if (!Array.isArray(hamUrunler) || !hamUrunler.length || hamUrunler.length > 40) {
+    throw new Error("Tek aktarımda 1–40 ürün kaydedilebilir.");
+  }
+  const urunler = hamUrunler.map((urun) => {
+    const ad = String(urun?.ad || "").trim().replace(/\s+/g, " ").slice(0, 120);
+    const kategori = String(urun?.kategori || "").trim().replace(/\s+/g, " ").slice(0, 80);
+    const aciklama = String(urun?.aciklama || "").trim().replace(/\s+/g, " ").slice(0, 500) || null;
+    const fiyat = Number(urun?.fiyat);
+    if (ad.length < 2 || kategori.length < 2 || !Number.isFinite(fiyat) || fiyat < 0 || fiyat > 1_000_000) {
+      throw new Error("Aktarım taslağında geçersiz ürün adı, kategori veya fiyat var.");
+    }
+    return { ad, kategori, aciklama, fiyat: Number(fiyat.toFixed(2)) };
+  });
+  const istemci = await pool.connect();
+  try {
+    await istemci.query("BEGIN");
+    const mevcutSonucu = await istemci.query("SELECT ad,kategori FROM urunler WHERE isletme_id=$1 AND arsivli=false", [tenantId]);
+    const kategoriSonucu = await istemci.query("SELECT ad FROM kategoriler WHERE isletme_id=$1", [tenantId]);
+    const kategoriAdlari = new Map(kategoriSonucu.rows.map(({ ad }) => [String(ad).trim().toLocaleLowerCase("tr-TR"), String(ad).trim()]));
+    const eslestirilenUrunler = urunler.map((urun) => ({
+      ...urun,
+      kategori: kategoriAdlari.get(urun.kategori.toLocaleLowerCase("tr-TR")) || urun.kategori,
+    }));
+    const mevcutlar = new Set(mevcutSonucu.rows.map((urun) =>
+      `${String(urun.kategori).trim().toLocaleLowerCase("tr-TR")}\u0000${String(urun.ad).trim().toLocaleLowerCase("tr-TR")}`
+    ));
+    const buAktarim = new Set();
+    const eklenenler = [];
+    const atlananlar = [];
+    const kategoriler = [...new Set(eslestirilenUrunler.map((urun) => urun.kategori))];
+    for (let sira = 0; sira < kategoriler.length; sira += 1) {
+      await istemci.query(
+        `INSERT INTO kategoriler (isletme_id,ad,sira,aktif,ceviriler,arsivli)
+         VALUES ($1,$2,$3,false,'{}'::jsonb,false)
+         ON CONFLICT (isletme_id,ad) DO UPDATE SET arsivli=false,guncelleme=NOW()`,
+        [tenantId, kategoriler[sira], 100 + sira * 10]
+      );
+    }
+    for (let sira = 0; sira < eslestirilenUrunler.length; sira += 1) {
+      const urun = eslestirilenUrunler[sira];
+      const anahtar = `${urun.kategori.toLocaleLowerCase("tr-TR")}\u0000${urun.ad.toLocaleLowerCase("tr-TR")}`;
+      if (mevcutlar.has(anahtar) || buAktarim.has(anahtar)) {
+        atlananlar.push({ ...urun, neden: "Aynı kategori ve ürün adı katalogda zaten var." });
+        continue;
+      }
+      buAktarim.add(anahtar);
+      const sonuc = await istemci.query(
+        `INSERT INTO urunler
+          (isletme_id,ad,fiyat,kategori,aciklama,urun_tipi,aktif,populer,stok_takibi,stok_adedi,sira,ceviriler,arsivli)
+         VALUES ($1,$2,$3,$4,$5,'burger',false,false,false,0,$6,'{}'::jsonb,false)
+         RETURNING *`,
+        [tenantId, urun.ad, urun.fiyat, urun.kategori, urun.aciklama, 100 + sira * 10]
+      );
+      eklenenler.push(urunDonustur(sonuc.rows[0], { stokDetayi: true }));
+    }
+    await istemci.query("COMMIT");
+    return { eklenenler, atlananlar, kategoriSayisi: kategoriler.length };
+  } catch (hata) {
+    await istemci.query("ROLLBACK");
+    throw hata;
+  } finally {
+    istemci.release();
+  }
 }
 
 async function onerilenUrunleriDogrula(isletmeId, ham, kendiId) {
@@ -769,7 +836,13 @@ export async function onerileriGetir(isletmeId, sepetUrunIdleri) {
 
 export async function urunAktiflikDegistir(isletmeId, id, aktif) {
   const tenantId = isletmeIdZorunlu(isletmeId);
+  const mevcut = await pool.query("SELECT kategori,gorsel FROM urunler WHERE isletme_id=$1 AND id=$2 AND arsivli=false", [tenantId, id]);
+  if (!mevcut.rows.length) throw new Error("Ürün bulunamadı.");
+  if (aktif && !mevcut.rows[0].gorsel) throw new Error("Ürünü yayınlamadan önce ürün görselini ekleyin.");
   await pool.query("UPDATE urunler SET aktif=$1,guncelleme=NOW() WHERE isletme_id=$2 AND id=$3 AND arsivli=false", [!!aktif, tenantId, id]);
+  if (aktif) {
+    await pool.query("UPDATE kategoriler SET aktif=true,gorsel=COALESCE(gorsel,$3),guncelleme=NOW() WHERE isletme_id=$1 AND ad=$2 AND arsivli=false", [tenantId, mevcut.rows[0].kategori, mevcut.rows[0].gorsel]);
+  }
 }
 
 export async function urunArsivle(isletmeId, id) {
